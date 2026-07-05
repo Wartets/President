@@ -530,6 +530,8 @@ def _apply_play(
     if state.is_equal_forced:
         emit(EventRuleTriggered, rule_name="EQUAL_FORCED", triggering_player_id=pid)
 
+    e_rev_before_flip = state.e_rev
+
     if not state.l_rev and triggers_double_revolution(action.cards, config, is_sequence_play):
         state.e_rev = not state.e_rev
         state.l_rev = True
@@ -550,7 +552,7 @@ def _apply_play(
             magnitude=len(action.cards),
         )
 
-    if triggers_magic_closure(action.cards, config, state.e_rev, action.declared_power, is_sequence_play):
+    if triggers_magic_closure(action.cards, config, e_rev_before_flip, action.declared_power, is_sequence_play):
         state.trick.is_closed = True
         emit(EventRuleTriggered, rule_name="MAGIC_CLOSURE", triggering_player_id=pid)
 
