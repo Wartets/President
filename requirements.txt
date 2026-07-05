@@ -1,0 +1,11 @@
+numpy
+pandas
+polars
+pyarrow
+ray
+torch
+rich
+psutil
+pynvml
+tqdm
+numba
