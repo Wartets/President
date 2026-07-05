@@ -8,13 +8,14 @@ transitions sont insérées par lot dans `RedisReplayBuffer` afin de réduire le
 from __future__ import annotations
 
 import io
-from typing import Dict, List, Optional, Type
+from typing import Dict, List, Optional, Type, Any
 
 import numpy as np
 import ray
 import torch
 
 from agents.greedy_bot import GreedyBot
+from agents.interface import AbstractBaseAgent
 from agents.rl_agent import _option_features
 from agents.rule_based_bot import RuleBasedBot
 from agents.torch_rl_agent import TorchRLAgent
@@ -53,7 +54,12 @@ class RolloutWorker:
         raw = self.buffer.client.get(_WEIGHTS_KEY)
         if raw is None:
             return
-        state_dict = torch.load(io.BytesIO(raw), map_location=agent.device)
+        # Redis clients may return `bytes` or `str` depending on configuration; ensure bytes for BytesIO
+        if isinstance(raw, str):
+            raw_bytes = raw.encode()
+        else:
+            raw_bytes = raw  # type: ignore[assignment]
+        state_dict = torch.load(io.BytesIO(raw_bytes), map_location=agent.device)
         agent.policy.load_state_dict(state_dict)
         agent.policy.eval()
 
@@ -86,7 +92,7 @@ class RolloutWorker:
         for _ in range(round_count):
             trainee = TorchRLAgent(player_id=0, config=self.config, epsilon=0.1)
             self._load_latest_weights(trainee)
-            opponents: Dict[int, object] = {
+            opponents: Dict[int, AbstractBaseAgent] = {
                 pid + 1: opponent_classes[pid](pid + 1, self.config)
                 for pid in range(self.config.player_count - 1)
             }

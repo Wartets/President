@@ -15,7 +15,7 @@ import argparse
 import os
 import shutil
 import time
-from typing import Any, Dict, List, Type
+from typing import Any, Dict, List, Type, cast
 
 import ray
 from rich.console import Console
@@ -36,7 +36,7 @@ from analytics.metrics_calc import (
 from core.config import GameConfig
 from engine.game_runner import Game
 
-_AGENT_REGISTRY: Dict[str, Type[AbstractBaseAgent]] = {
+_AGENT_REGISTRY: Dict[str, Type[Any]] = {
     "greedy": GreedyBot,
     "rule_based": RuleBasedBot,
     "random": RandomBot,
@@ -114,7 +114,8 @@ def launch_research(
     for i in range(total_games % num_workers):
         games_per_worker[i] += 1
 
-    workers = [GameSimulationWorker.remote(agent_profile) for _ in range(num_workers)]
+    # Ray's .remote returns actor handles at runtime; silence static type checker via cast to Any
+    workers = [cast(Any, GameSimulationWorker).remote(agent_profile) for _ in range(num_workers)]
     futures = []
     future_game_counts: Dict[Any, int] = {}
     seed_cursor = base_seed

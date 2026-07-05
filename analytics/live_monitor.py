@@ -13,7 +13,7 @@ mesure d'utilisation GPU, ce dernier étant chargé de manière paresseuse et to
 from __future__ import annotations
 
 import time
-from typing import List, Optional
+from typing import List, Optional, Any
 
 import psutil
 from rich.console import Console
@@ -25,6 +25,9 @@ try:
     _NVML_AVAILABLE = True
 except ImportError:
     _NVML_AVAILABLE = False
+
+# Ensure the name exists for type checkers when NVML is not available
+pynvml: Any = None
 
 
 def _try_init_nvml() -> Optional[int]:

@@ -84,7 +84,8 @@ class Trainer:
         features = np.stack([np.array(record["features"], dtype=np.float32) for record in batch])
         returns = np.array([record["return_value"] for record in batch], dtype=np.float32)
         baseline = float(returns.mean())
-        advantages = returns - baseline
+        # Ensure numpy-scalar dtype for subtraction to satisfy static type checkers
+        advantages = returns - np.float32(baseline)
 
         features_tensor = torch.as_tensor(features, device=self.device)
         advantages_tensor = torch.as_tensor(advantages, device=self.device)

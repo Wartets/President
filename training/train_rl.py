@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import argparse
 import copy
-from typing import Dict, List
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 from rich.console import Console
@@ -23,6 +23,7 @@ from tqdm import tqdm
 from agents.greedy_bot import GreedyBot
 from agents.rl_agent import FEATURE_DIM, RLAgent, _option_features
 from agents.rule_based_bot import RuleBasedBot
+from agents.interface import AbstractBaseAgent
 from core.config import GameConfig
 from engine.event_bus import EventBus
 from engine.game_runner import Game
@@ -57,12 +58,12 @@ class ReturnTracker:
 def _run_training_round(
     config: GameConfig,
     trainee: RLAgent,
-    opponents: Dict[int, object],
-    tracker: List[np.ndarray],
+    opponents: Dict[int, AbstractBaseAgent],
+    tracker: List[Tuple[np.ndarray, float, float]],
     round_index: int,
     previous_roles,
     game_id: str,
-) -> float:
+) -> Tuple[float, Optional[Dict[int, str]]]:
     """
     Exécute une unique manche d'entraînement et collecte les caractéristiques des décisions du joueur entraîné.
 
@@ -142,7 +143,7 @@ def train(
             pid + 1: opponent_classes[pid](pid + 1, config)
             for pid in range(config.player_count - 1)
         }
-        tracker: List[np.ndarray] = []
+        tracker: List[Tuple[np.ndarray, float, float]] = []
         vp, roles = _run_training_round(
             config, trainee, opponents, tracker, round_index, roles, "training-game"
         )

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import os
 import threading
+from typing import Any, cast
 
 import ray
 
@@ -51,7 +52,8 @@ def launch(
     trainer_thread = threading.Thread(target=trainer.run, args=(batch_size, total_steps), daemon=True)
     trainer_thread.start()
 
-    workers = [RolloutWorker.remote(config, redis_host, redis_port) for _ in range(num_workers)]
+    # Ray actor creation — cast to Any to satisfy static type checker about .remote
+    workers = [cast(Any, RolloutWorker).remote(config, redis_host, redis_port) for _ in range(num_workers)]
     while trainer_thread.is_alive():
         futures = [
             worker.run_rounds.remote(opponent_pool, rounds_per_worker_batch)
