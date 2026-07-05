@@ -66,8 +66,11 @@ class GameConfig:
     Paramètre `skip_turn_enabled` : active le saut de tour déclenché par un rang paramétrable.
     Paramètre `skip_turn_rank` : rang déclenchant le saut de tour.
     Paramètre `interception_enabled` : active l'interception hors-tour, nécessite $N_D \\ge 2$.
+    Paramètre `interception_closes_trick` : détermine l'effet de résolution d'une interception réussie, clôture immédiate du pli au profit de
+    l'intercepteur si vrai, reprise simple de l'ordre de jeu à partir de l'intercepteur sinon.
     Paramètre `putsch_enabled` : active le droit d'invocation du Putsch par le rôle `ROLE_SCUM`.
-    Paramètre `blind_tax_enabled` : remplace la sélection déterministe des cartes transférées par le rôle `ROLE_SCUM` par une sélection aléatoireuniforme.
+    Paramètre `blind_tax_enabled` : remplace la sélection déterministe des cartes transférées par le rôle `ROLE_SCUM` par une sélection aléatoire
+    uniforme.
     Paramètre `strict_remainder_allocation` : attribue le reste de la distribution modulaire à un rôle ciblé plutôt que de le répartir modulo $N$.
     Paramètre `strict_remainder_role` : rôle ciblé par `strict_remainder_allocation`.
     Paramètre `finish_penalty_enabled` : active la pénalité de sortie.
@@ -106,6 +109,7 @@ class GameConfig:
     skip_turn_rank: str = "8"
 
     interception_enabled: bool = False
+    interception_closes_trick: bool = True
 
     putsch_enabled: bool = False
     blind_tax_enabled: bool = False

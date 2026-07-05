@@ -27,6 +27,7 @@ from agents.mcts_bot import MCTSBot
 from agents.random_bot import RandomBot
 from agents.rule_based_bot import RuleBasedBot
 from analytics.event_logger import EventLogger
+from analytics.live_monitor import LiveMonitor
 from analytics.metrics_calc import (
     action_space_entropy, branching_factor_average, e_rev_volatility,
     gini_initial_hand_power, role_transition_matrix, trick_length_average,
@@ -114,20 +115,25 @@ def launch_research(
 
     workers = [GameSimulationWorker.remote(agent_profile) for _ in range(num_workers)]
     futures = []
+    future_game_counts: Dict[Any, int] = {}
     seed_cursor = base_seed
     for worker, count in zip(workers, games_per_worker):
         if count == 0:
             continue
-        futures.append(worker.run_batch.remote(seed_cursor, player_count, rounds_per_game, count))
+        future = worker.run_batch.remote(seed_cursor, player_count, rounds_per_game, count)
+        futures.append(future)
+        future_game_counts[future] = count
         seed_cursor += count
 
     start = time.time()
     all_records: List[dict] = []
-    with tqdm(total=len(futures), desc="Simulating", unit="batch", mininterval=0.5) as bar:
+    with tqdm(total=len(futures), desc="Simulating", unit="batch", mininterval=0.5) as bar, LiveMonitor(console=console) as monitor:
         pending = list(futures)
         while pending:
             done, pending = ray.wait(pending, num_returns=1)
-            all_records.extend(ray.get(done[0]))
+            batch_records = ray.get(done[0])
+            all_records.extend(batch_records)
+            monitor.record_games(future_game_counts.get(done[0], 0))
             bar.update(1)
     elapsed = time.time() - start
 

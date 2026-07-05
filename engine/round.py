@@ -338,7 +338,10 @@ def run_round(
                 state.trick.is_closed = True
                 break
 
-            state.current_player_id = _advance_player(state, n, pid)
+            advance_from = state.trick.last_player_id if (
+                action.action_type == ActionType.ACTION_PLAY and state.trick.last_player_id is not None
+            ) else pid
+            state.current_player_id = _advance_player(state, n, advance_from)
 
         winner = state.trick.last_player_id
         if winner is not None:
@@ -509,6 +512,8 @@ def _apply_play(state: GameState, config: GameConfig, agents, pid: int, action: 
                 state.trick.last_player_id = interceptor_id
                 state.current_player_id = interceptor_id
                 emit(EventRuleTriggered, rule_name="INTERCEPTION", triggering_player_id=interceptor_id)
+                if config.interception_closes_trick:
+                    state.trick.is_closed = True
 
     if not state.trick.is_closed:
         skip_count = triggers_skip_turn(action.cards, config)
@@ -554,7 +559,7 @@ def _finish_player(
     `PENALTY_INSTANT_SCUM`, `pid` est ajouté à `instant_scum_players`, son rôle et son point de victoire de la manche courante étant alors
     substitués par ceux du dernier index de sortie.
     """
-    triggered_revolution = triggers_revolution(action.cards, config, False)
+    triggered_revolution = triggers_revolution(action.cards, config, state.trick.is_sequence)
     penalty_condition = matches_finish_penalty(action.cards, config, state.e_rev, triggered_revolution)
 
     if config.finish_penalty_extended and penalty_condition:
