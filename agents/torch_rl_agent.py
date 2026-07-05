@@ -1,84 +1,107 @@
 """
-Module de l'agent à politique linéaire entraînable.
+Module de l'agent à politique neuronale entraînable sur GPU.
 
-Le module définit `RLAgent`, une implémentation de `AbstractBaseAgent` dont la décision de jeu repose sur une politique linéaire appliquée à
-un vecteur de caractéristiques par option légale, plutôt que sur une règle fixe. L'agent expose une méthode de sollicitation par lot
-(`get_batch_action`) effectuant une unique multiplication matricielle sur l'ensemble des options candidates de plusieurs états simultanés.
-Les poids de la politique sont mutables et destinés à être ajustés par une boucle d'entraînement externe ; l'agent n'implémente lui-même
-aucun algorithme d'apprentissage.
+Le module définit `TorchRLAgent`, une implémentation de `AbstractBaseAgent` remplaçant la politique linéaire `numpy` de
+`agents.rl_agent.RLAgent` par un petit réseau de neurones `torch.nn.Module` (`PolicyNet`), évalué par lot sur l'accélérateur disponible.
+L'agent réutilise la même construction de caractéristiques par option (`_option_features`, `FEATURE_DIM`) que `agents.rl_agent`, afin de
+rester compatible avec les enregistrements produits par `training.train_rl`. L'inférence par lot (`get_batch_action`) exécute une unique
+passe avant sur l'ensemble des options candidates de tous les états du lot, sous `torch.autocast` lorsque l'accélérateur le supporte.
 
-Le module dépend de `agents.interface`, `core.models`, `core.math_utils`, `core.rules_engine`, `core.config`, `engine.state` et de `numpy`.
+Le module dépend de `agents.interface`, `agents.rl_agent` pour `FEATURE_DIM` et `_option_features`, `core.config`, `core.models`,
+`engine.state` et de `torch`.
 """
 
 from __future__ import annotations
 
 import random
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
+import torch
+import torch.nn as nn
 
 from agents.interface import AbstractBaseAgent
+from agents.rl_agent import FEATURE_DIM, _option_features
 from core.config import GameConfig
-from core.math_utils import f_power
 from core.models import Action, ActionType, Card, Hand
 from core.rules_engine import generate_sequence_plays, generate_uniform_plays
 from engine.state import GameState
 
-# Dimension du vecteur de caractéristiques associé à chaque option de jeu candidate.
-FEATURE_DIM = 5
+# Largeur de la couche cachée unique du réseau de politique.
+_HIDDEN_DIM = 32
 
 
-def _option_features(
-    cards: Tuple[Card, ...],
-    declared_power: Optional[int],
-    hand_size_before: int,
-    e_rev: bool,
-) -> np.ndarray:
+def resolve_device(preferred: Optional[str] = None) -> torch.device:
     """
-    Construit le vecteur de caractéristiques d'une option de jeu candidate.
+    Détermine le périphérique de calcul à utiliser pour l'inférence et l'entraînement.
 
-    Paramètre `cards` : combinaison candidate.
-    Paramètre `declared_power` : puissance déclarée pour les Jokers présents, ou `None`.
-    Paramètre `hand_size_before` : taille de la main avant la pose, entier strictement positif.
-    Paramètre `e_rev` : état de révolution courant.
-    Retourne un tableau `numpy.ndarray` de type `float64` et de taille `FEATURE_DIM`, composé dans l'ordre de la puissance résultante
-    normalisée sur $[0, 1]$, de la taille de la combinaison normalisée par la taille de la main répétée deux fois, d'un indicateur binaire
-    de présence de Joker, et d'un terme constant de biais. Aucun effet de bord.
+    Paramètre `preferred` : nom de périphérique explicitement demandé, chaîne parmi `'cuda'`, `'cpu'`, ou `None` pour une sélection
+    automatique.
+    Retourne une instance de `torch.device`, égale à `preferred` si fourni et disponible, sinon `'cuda'` si un périphérique CUDA est
+    détecté, sinon `'cpu'`. Aucun effet de bord.
     """
-    non_jokers = [c for c in cards if not c.is_joker()]
-    power = f_power(non_jokers[0], e_rev) if non_jokers else (declared_power or 0)
-    contains_joker = 1.0 if len(non_jokers) != len(cards) else 0.0
-    size = len(cards)
-    size_ratio = size / max(hand_size_before, 1)
-    return np.array(
-        [power / 16.0, size_ratio, size_ratio, contains_joker, 1.0],
-        dtype=np.float64,
-    )
+    if preferred is not None:
+        return torch.device(preferred)
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-class RLAgent(AbstractBaseAgent):
+class PolicyNet(nn.Module):
     """
-    Agent dont la décision de jeu repose sur une politique linéaire entraînable.
+    Réseau de politique évaluant un score scalaire par option de jeu candidate.
+
+    Champ `layers` : séquence de couches linéaires et d'activations `torch.nn.Module`, prenant en entrée un vecteur de taille
+    `FEATURE_DIM` et produisant un score scalaire non borné.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(FEATURE_DIM, _HIDDEN_DIM),
+            nn.ReLU(),
+            nn.Linear(_HIDDEN_DIM, _HIDDEN_DIM),
+            nn.ReLU(),
+            nn.Linear(_HIDDEN_DIM, 1),
+        )
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        """
+        Calcule le score de chaque vecteur de caractéristiques du lot.
+
+        Paramètre `features` : tenseur `(K, FEATURE_DIM)` de type `float32`, `K` options candidates agrégées sur un ou plusieurs états.
+        Retourne un tenseur `(K,)` de type `float32`, score scalaire par option. Aucun effet de bord.
+        """
+        return self.layers(features).squeeze(-1)
+
+
+class TorchRLAgent(AbstractBaseAgent):
+    """
+    Agent dont la décision de jeu repose sur un réseau de neurones entraînable, évalué par lot sur GPU.
 
     Champ `config` : configuration de la partie.
-    Champ `weights` : vecteur `numpy.ndarray` de poids de la politique, taille `FEATURE_DIM`, mutable, ajustable par un processus
-    d'entraînement externe.
+    Champ `device` : périphérique `torch` utilisé pour l'inférence.
+    Champ `policy` : instance de `PolicyNet`, transférée sur `device`.
     Champ `epsilon` : probabilité d'exploration aléatoire lors du choix d'une action, domaine $[0, 1]$.
-    Champ `_rng` : générateur pseudo-aléatoire dédié à l'exploration et aux décisions par défaut.
+    Champ `use_amp` : indique si l'inférence utilise la précision mixte `torch.autocast`, actif uniquement lorsque `device` est de type
+    `'cuda'`.
+    Champ `_rng` : générateur pseudo-aléatoire dédié à l'exploration.
     """
 
     def __init__(
         self,
         player_id: int,
         config: GameConfig,
-        weights: Optional[np.ndarray] = None,
+        policy: Optional[PolicyNet] = None,
         epsilon: float = 0.1,
+        device: Optional[str] = None,
     ) -> None:
         super().__init__(player_id)
         self.config = config
-        self.weights = weights if weights is not None else np.zeros(FEATURE_DIM, dtype=np.float64)
+        self.device = resolve_device(device)
+        self.policy = (policy if policy is not None else PolicyNet()).to(self.device)
+        self.policy.eval()
         self.epsilon = epsilon
-        self._rng = random.Random(f"{config.random_seed}:{player_id}:rl")
+        self.use_amp = self.device.type == "cuda"
+        self._rng = random.Random(f"{config.random_seed}:{player_id}:torch_rl")
 
     def _legal_options(self, hand: Hand, game_state: GameState) -> List[Tuple[Tuple[Card, ...], Optional[int]]]:
         """
@@ -116,14 +139,15 @@ class RLAgent(AbstractBaseAgent):
         )
         return Action(action_type=action_type)
 
+    @torch.no_grad()
     def choose_action(self, game_state: GameState) -> Action:
         """
-        Sélectionne une action de tour par évaluation linéaire des options légales.
+        Sélectionne une action de tour par évaluation du réseau de politique sur les options légales.
 
         Paramètre `game_state` : vue matérialisée de l'état courant.
-        Retourne une instance de `Action`. Avec une probabilité `epsilon`, une option légale est choisie uniformément (exploration) ;
-        sinon, l'option de score `weights . features` maximal est choisie (exploitation). Retourne un passe conforme à `pass_type` si aucune
-        option n'est disponible. Effet de bord : consomme l'état interne du générateur pseudo-aléatoire de l'agent.
+        Retourne une instance de `Action`. Avec une probabilité `epsilon`, une option légale est choisie uniformément ; sinon, l'option de
+        score `policy(features)` maximal est choisie. Retourne un passe conforme à `pass_type` si aucune option n'est disponible. Effet de
+        bord : consomme l'état interne du générateur pseudo-aléatoire de l'agent.
         """
         hand = game_state.hands[self.player_id]
         options = self._legal_options(hand, game_state)
@@ -135,22 +159,24 @@ class RLAgent(AbstractBaseAgent):
             return Action(action_type=ActionType.ACTION_PLAY, cards=cards, declared_power=declared_power)
 
         hand_size = hand.size()
-        feature_matrix = np.stack(
+        features = np.stack(
             [_option_features(cards, declared, hand_size, game_state.e_rev) for cards, declared in options]
         )
-        scores = feature_matrix @ self.weights
-        best_index = int(np.argmax(scores))
+        tensor = torch.as_tensor(features, dtype=torch.float32, device=self.device)
+        scores = self.policy(tensor)
+        best_index = int(torch.argmax(scores).item())
         cards, declared_power = options[best_index]
         return Action(action_type=ActionType.ACTION_PLAY, cards=cards, declared_power=declared_power)
 
+    @torch.no_grad()
     def get_batch_action(self, game_states: List[GameState]) -> List[Action]:
         """
-        Sélectionne une action de tour pour un lot d'états simultanés par une unique évaluation matricielle.
+        Sélectionne une action de tour pour un lot d'états simultanés par une unique passe avant sur GPU.
 
-        Paramètre `game_states` : liste de vues matérialisées de l'état courant, une par simulation parallèle.
-        Retourne une liste de `Action` de taille identique à `game_states`, dans le même ordre. Effet de bord : consomme l'état interne du
-        générateur pseudo-aléatoire de l'agent pour chaque état sans option légale ou sujet à exploration. Complexité : une unique
-        multiplication matricielle sur l'ensemble des options candidates de tous les états, plutôt qu'une évaluation séquentielle par état.
+        Paramètre `game_states` : liste de vues matérialisées de l'état courant, une par simulation parallèle, taille $B$.
+        Retourne une liste de `Action` de taille $B$, dans le même ordre que `game_states`. Effet de bord : consomme l'état interne du
+        générateur pseudo-aléatoire de l'agent pour chaque état sans option légale ou sujet à exploration ; transfère un unique tenseur de
+        caractéristiques agrégées sur `self.device` puis exécute l'inférence sous précision mixte lorsque `use_amp` est vrai.
         """
         per_state_options: List[List[Tuple[Tuple[Card, ...], Optional[int]]]] = []
         all_features: List[np.ndarray] = []
@@ -167,15 +193,24 @@ class RLAgent(AbstractBaseAgent):
                 all_features.append(_option_features(cards, declared, hand_size, game_state.e_rev))
                 owner_index.append(state_index)
 
-        scores = np.zeros(0, dtype=np.float64)
+        scores_by_flat_index: dict = {}
         if all_features:
-            feature_matrix = np.stack(all_features)
-            scores = feature_matrix @ self.weights
+            feature_tensor = torch.as_tensor(
+                np.stack(all_features), dtype=torch.float32, device=self.device
+            )
+            if self.use_amp:
+                with torch.autocast(device_type="cuda", dtype=torch.float16):
+                    scores_tensor = self.policy(feature_tensor)
+            else:
+                scores_tensor = self.policy(feature_tensor)
+            scores_np = scores_tensor.float().cpu().numpy()
+            for flat_index, score in enumerate(scores_np):
+                scores_by_flat_index[flat_index] = float(score)
 
-        best_score_by_state: Dict[int, float] = {}
-        best_flat_index_by_state: Dict[int, int] = {}
+        best_score_by_state: dict = {}
+        best_flat_index_by_state: dict = {}
         for flat_index, state_index in enumerate(owner_index):
-            score = float(scores[flat_index])
+            score = scores_by_flat_index[flat_index]
             if state_index not in best_score_by_state or score > best_score_by_state[state_index]:
                 best_score_by_state[state_index] = score
                 best_flat_index_by_state[state_index] = flat_index
@@ -204,6 +239,8 @@ class RLAgent(AbstractBaseAgent):
         Paramètre `count` : nombre de cartes à céder.
         Retourne une liste de `Card` de taille `count`, triée par puissance croissante. Aucun effet de bord.
         """
+        from core.math_utils import f_power
+
         ordered = sorted(hand.cards, key=lambda c: f_power(c, game_state.e_rev))
         return ordered[:count]
 
@@ -216,6 +253,7 @@ class RLAgent(AbstractBaseAgent):
         la main hors révolution est inférieure ou égale à dix. Aucun effet de bord.
         """
         from collections import Counter
+        from core.math_utils import f_power
 
         powers = [f_power(c, False) for c in hand.cards if not c.is_joker()]
         if not powers:
@@ -245,3 +283,22 @@ class RLAgent(AbstractBaseAgent):
             return False, None
         decision = self._rng.random() >= self.epsilon
         return decision, (twins[0] if decision else None)
+
+    def save_weights(self, path: str) -> None:
+        """
+        Sauvegarde les poids du réseau de politique sur disque.
+
+        Paramètre `path` : chemin du fichier de destination.
+        Retourne `None`. Effet de bord : écrit l'état `state_dict` du réseau au format `torch`.
+        """
+        torch.save(self.policy.state_dict(), path)
+
+    def load_weights(self, path: str) -> None:
+        """
+        Charge les poids du réseau de politique depuis le disque.
+
+        Paramètre `path` : chemin du fichier source.
+        Retourne `None`. Effet de bord : remplace l'état interne de `self.policy` par le contenu chargé, transféré sur `self.device`.
+        """
+        state_dict = torch.load(path, map_location=self.device)
+        self.policy.load_state_dict(state_dict)

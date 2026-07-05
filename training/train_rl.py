@@ -3,8 +3,8 @@ Module de la boucle d'entraînement par politique linéaire (REINFORCE).
 
 Le module implémente l'entraînement de `agents.rl_agent.RLAgent` par un algorithme REINFORCE simplifié : les poids de la politique
 linéaire sont ajustés proportionnellement au gradient du score des options choisies, pondéré par le retour cumulé (point de victoire de la
-manche). L'entraînement s'appuie exclusivement sur le moteur `Event Sourcing` (Slow-Path) ; le Fast-Path vectorisé décrit dans le Document 4
-fait l'objet d'un module distinct.
+manche). L'entraînement s'appuie exclusivement sur le moteur `Event Sourcing` (Slow-Path) ; le Fast-Path vectorisé fait l'objet d'un module
+distinct.
 
 Le module dépend de `core.config`, `agents.rl_agent`, `agents.greedy_bot`, `agents.rule_based_bot`, `engine.game_runner`, `engine.event_bus`
 et de `numpy`. Dépendance externe : `tqdm` pour le suivi de progression, `rich` pour le tableau de bord console.

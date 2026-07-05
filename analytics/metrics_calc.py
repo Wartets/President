@@ -2,15 +2,14 @@
 Module de calcul des métriques de recherche.
 
 Le module transforme le flux d'événements collecté par `EventLogger` en métriques multidimensionnelles. Il implémente les familles de
-métriques documentées par l'architecture : métriques macro (matrice de transition de Markov des rôles, mobilité sociale, efficacité du
-Putsch, impact de la taxe d'échange), métriques micro (indice de Gini de la puissance de main initiale, Card Time-To-Live, efficacité de
-substitution du Joker, ratio de capture de points), métriques comportementales (taux de passe sous-optimal, indice d'agressivité à
-l'ouverture, facteur de dominance de pli, taux de contre-révolution, taux d'interception manquée), métriques de complexité et théorie de
-l'information (facteur de branchement moyen, entropie de l'espace d'actions), et métriques additionnelles (corrélation position d'ouverture
-/ rang final, taux d'usage magique du Joker, distribution des tailles de combinaison, longueur moyenne des plis, volatilité de la
-Révolution, couverture du saut de tour). La structure du module permet l'ajout de métriques supplémentaires suivant le même schéma : une
-fonction pure prenant en entrée les enregistrements d'`EventLogger` ou une séquence de rôles, et retournant une valeur ou une structure
-numérique.
+métriques : métriques macro (matrice de transition de Markov des rôles, mobilité sociale, efficacité du Putsch, impact de la taxe d'échange),
+métriques micro (indice de Gini de la puissance de main initiale, Card Time-To-Live, efficacité de substitution du Joker, ratio de capture de
+points), métriques comportementales (taux de passe sous-optimal, indice d'agressivité à l'ouverture, facteur de dominance de pli, taux de
+contre-révolution, taux d'interception manquée), métriques de complexité et théorie de l'information (facteur de branchement moyen, entropie
+de l'espace d'actions), et métriques additionnelles (corrélation position d'ouverture / rang final, taux d'usage magique du Joker, distribution
+des tailles de combinaison, longueur moyenne des plis, volatilité de la Révolution, couverture du saut de tour). La structure du module permet
+l'ajout de métriques supplémentaires suivant le même schéma : une fonction pure prenant en entrée les enregistrements d'`EventLogger` ou une
+séquence de rôles, et retournant une valeur ou une structure numérique.
 
 Le module dépend de `analytics.event_logger` pour le type `EventLogger`, de `core.config` pour `GameConfig`, de `core.math_utils` pour
 `f_power`, `f_points` et `rank_facial_index`, et de `core.models` pour la reconstruction des cartes à partir des enregistrements sérialisés.

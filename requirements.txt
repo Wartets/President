@@ -9,3 +9,4 @@ psutil
 pynvml
 tqdm
 numba
+redis[hiredis]

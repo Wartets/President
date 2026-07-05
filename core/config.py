@@ -43,8 +43,8 @@ class GameConfig:
     La classe regroupe la totalité des paramètres nécessaires à l'instanciation d'une `Game`. Chaque champ correspond à un paramètre
     documenté dans la spécification des règles. L'immutabilité de la classe garantit qu'une configuration ne peut pas être modifiée après le
     démarrage d'une partie, ce qui est une précondition de la reproductibilité exigée par `random_seed`. Aucun champ ne possède de valeur dépendante
-    d'un état de jeu ; tous les champs sont indépendants les uns des autres à l'exception des couples explicitement documentés (`magic_two` et
-    `magic_card_enabled`, `double_revolution_enabled` et `revolution_enabled`, `interception_enabled` et la contrainte $N_D \\ge 2$).
+    d'un état de jeu ; tous les champs sont indépendants les uns des autres à l'exception des couples (`magic_two` et `magic_card_enabled`,
+    `double_revolution_enabled` et `revolution_enabled`, `interception_enabled` et la contrainte $N_D \\ge 2$).
 
     Paramètre `random_seed` : graine de génération aléatoire, entier, domaine non borné, utilisée pour tout tirage aléatoire de la partie.
     Paramètre `player_count` : nombre de joueurs $N$, entier, domaine $N \\ge 3$.

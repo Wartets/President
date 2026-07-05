@@ -1,7 +1,7 @@
 """
 Module de lancement de simulations massives parallélisées.
 
-Le module implémente le lanceur de recherche décrit au Document 4 §2.A : distribution de $P$ parties indépendantes sur les cœurs
+Le module implémente le lanceur de recherche : distribution de $P$ parties indépendantes sur les cœurs
 disponibles via `ray`, chaque partie accumulant ses événements dans un `EventLogger` dédié, vidangé périodiquement au format Parquet. Le
 module agrège ensuite un sous-ensemble des métriques de `analytics.metrics_calc` sur l'ensemble des parties simulées.
 
@@ -162,7 +162,7 @@ def main() -> None:
 
     Retourne `None`. Effet de bord : lit les arguments de la ligne de commande et invoque `launch_research`.
     """
-    parser = argparse.ArgumentParser(description="Lanceur de simulations massives parallélisées (Document 4 §2.A)")
+    parser = argparse.ArgumentParser(description="Lanceur de simulations massives parallélisées")
     parser.add_argument("--games", type=int, default=1000)
     parser.add_argument("--player-count", type=int, default=4)
     parser.add_argument("--rounds-per-game", type=int, default=10)

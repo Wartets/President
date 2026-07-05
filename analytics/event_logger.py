@@ -122,8 +122,8 @@ class EventLogger:
         Convertit le journal en `DataFrame` Polars.
 
         Retourne un objet `polars.DataFrame` construit à partir de `to_records()`, destiné aux analyses statistiques à grande échelle
-        parallélisées nativement, conformément à la stratégie de remplacement de Pandas par Polars documentée pour le passage à
-        l'échelle (Document 4 §4). Lève `ImportError` si Polars n'est pas installé. Aucun effet de bord.
+        parallélisées nativement, conformément à la stratégie de remplacement de Pandas par Polars pour le passage à l'échelle.
+        Lève `ImportError` si Polars n'est pas installé. Aucun effet de bord.
         """
         import polars as pl
 

@@ -2,8 +2,8 @@
 Module de l'interface d'agent.
 
 Le module définit `AbstractBaseAgent`, la classe abstraite dont doit hériter toute implémentation de joueur, humaine ou automatisée. L'interface expose
-les quatre points de sollicitation du moteur documentés par l'architecture : le choix d'une action de tour, le choix des cartes lors d'un échange libre,
-la décision d'invocation du Putsch et la réponse à une opportunité d'interception.
+les quatre points de sollicitation du moteur : le choix d'une action de tour, le choix des cartes lors d'un échange libre, la décision d'invocation du
+Putsch et la réponse à une opportunité d'interception.
 
 Le module dépend de `core.models` pour les types `Hand`, `Action` et `Card`, et de `engine.state` pour le type `GameState`.
 """

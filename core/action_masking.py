@@ -3,8 +3,8 @@ Module de masquage d'actions vectorisé pour le Fast-Path d'entraînement.
 
 Le module fournit `build_action_mask_batch`, fonction pure convertissant un lot d'options légales par état, telles que retournées par
 `generate_uniform_plays` et `generate_sequence_plays`, en un unique masque booléen `numpy.ndarray` exploitable directement en sortie du
-`forward pass` d'un réseau de neurones, conformément à la stratégie d'Action Masking documentée pour l'accélération GPU. Le module ne
-recalcule aucune légalité ; il se contente de projeter des options déjà validées par `core.rules_engine` sur un espace d'action indexé fixe.
+`forward pass` d'un réseau de neurones. Le module ne recalcule aucune légalité ; il se contente de projeter des options déjà validées par
+`core.rules_engine` sur un espace d'action indexé fixe.
 
 Le module dépend de `core.models` pour le type `Card` et `numpy` pour la représentation tensorielle du masque. Aucun effet de bord global.
 """

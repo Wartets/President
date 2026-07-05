@@ -294,7 +294,7 @@ def is_valid_sequence_combination(
     return _is_consecutive_run(powers_array)
 
 
-# Déclencheurs de règles avancées (matrice de compatibilité, Document 1 §7)
+# Déclencheurs de règles avancées (matrice de compatibilité)
 
 def _remapped_magic_rank(config: GameConfig, e_rev: bool) -> str:
     """
@@ -356,9 +356,8 @@ def is_magic_single_clear(card: Card, config: GameConfig, e_rev: bool) -> bool:
     Paramètre `config` : configuration de la partie.
     Paramètre `e_rev` : état de révolution courant.
     Retourne un booléen, vrai si une règle de clôture magique est active, si `effective_magic_single_clears_all` est vrai, et si `card`
-    n'est pas un Joker et possède le rang magique effectif remappé selon `e_rev`. Conformément à l'interaction avec la taille de pli $X$
-    documentée en Document 1 §6.2, une telle carte clôture un pli de taille $X \\ge 1$ quelconque indépendamment de la puissance courante
-    du pli. Aucun effet de bord.
+    n'est pas un Joker et possède le rang magique effectif remappé selon `e_rev`. Une telle carte clôture un pli de taille $X \\ge 1$
+    quelconque indépendamment de la puissance courante du pli. Aucun effet de bord.
     """
     if not config.effective_magic_card_enabled():
         return False
@@ -591,8 +590,7 @@ def is_action_valid(
     Paramètre `allow_equal_power` : autorise une puissance résultante égale à `min_power_exclusive` plutôt que strictement supérieure, conformément à
     `GameConfig.skip_on_equal`.
     Paramètre `config` : configuration de la partie, optionnelle. Lorsqu'elle est fournie, autorise la clôture magique à carte unique
-    (`is_magic_single_clear`) indépendamment de `required_size`, conformément à l'interaction documentée en Document 1 §6.2. `None`
-    désactive cette vérification.
+    (`is_magic_single_clear`) indépendamment de `required_size`. `None` désactive cette vérification.
     Retourne un booléen, vrai si `cards` constitue un sous-ensemble de `hand`, si sa taille correspond à `required_size` lorsque celui-ci est
     fourni, et si `cards` constitue soit une combinaison uniforme valide de puissance strictement supérieure à `min_power_exclusive`, soit, lorsque
     `straights_enabled` est vrai, une suite valide de puissance minimale strictement supérieure à `sequence_min_power`. Retourne également vrai,
@@ -665,9 +663,8 @@ def matches_finish_penalty(
     Paramètre `config` : configuration de la partie.
     Paramètre `e_rev_before` : état de révolution immédiatement avant la pose de `final_cards`, utilisé pour déterminer le rang suprême courant.
     Paramètre `triggered_revolution` : indique si `final_cards` a déclenché une révolution au sens de `triggers_revolution`.
-    Retourne un booléen, vrai si au moins une des conditions documentées est satisfaite : présence du rang suprême courant, ou, lorsque
-    `finish_penalty_extended` est vrai, présence d'un Joker sous `no_finish_on_joker`, ou déclenchement d'une révolution sous
-    `no_finish_on_revolution`. Aucun effet de bord.
+    Retourne un booléen, vrai si au moins une des conditions est satisfaite : présence du rang suprême courant, ou, lorsque `finish_penalty_extended`
+    est vrai, présence d'un Joker sous `no_finish_on_joker`, ou déclenchement d'une révolution sous `no_finish_on_revolution`. Aucun effet de bord.
     """
     supreme_rank = "3" if e_rev_before else "2"
     if any(not c.is_joker() and c.rank.value == supreme_rank for c in final_cards):
