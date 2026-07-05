@@ -16,6 +16,7 @@ import numpy as np
 
 from agents.interface import AbstractBaseAgent
 from core.config import GameConfig
+from events.base import compute_state_hash
 from engine.event_bus import EventBus
 from engine.round import run_round
 from events.structural import EventGameConfig, EventGameStart
@@ -107,14 +108,20 @@ class Game:
         self.round_index = 0
 
         self.event_bus.publish(
-            EventGameConfig(timestamp=0, game_id=game_id, round_id=-1, state_hash="", config=config)
+            EventGameConfig(
+                timestamp=0,
+                game_id=game_id,
+                round_id=-1,
+                state_hash=compute_state_hash(config),
+                config=config,
+            )
         )
         self.event_bus.publish(
             EventGameStart(
                 timestamp=0,
                 game_id=game_id,
                 round_id=-1,
-                state_hash="",
+                state_hash=compute_state_hash((config, tuple(range(config.player_count)))),
                 config=config,
                 player_ids=tuple(range(config.player_count)),
             )

@@ -127,14 +127,14 @@ class EventLogger:
 
     def to_dataframe(self):
         """
-        Convertit le journal en `DataFrame` Pandas.
+        Convertit le journal en table analytique.
 
-        Retourne un objet `pandas.DataFrame` construit à partir de `to_records()`. Lève `ImportError` si Pandas n'est pas installé.
+        Retourne un objet `polars.DataFrame` construit à partir de `to_records()`. Lève `ImportError` si Polars n'est pas installé.
         Aucun effet de bord.
         """
-        import pandas as pd
+        import polars as pl
 
-        return pd.DataFrame(self.to_records())
+        return pl.DataFrame(self.to_records())
 
     def to_polars_dataframe(self):
         """

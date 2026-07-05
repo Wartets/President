@@ -507,6 +507,16 @@ def generate_uniform_plays(
             combo = chosen_natural + chosen_jokers
             declared = power if chosen_jokers else None
             results.append((combo, declared))
+
+    if num_jokers > 0:
+        power_floor = min_power_exclusive if min_power_exclusive is not None else 2
+        sizes = [required_size] if required_size is not None else list(range(1, num_jokers + 1))
+        for size in sizes:
+            if size is None or size < 1 or size > num_jokers:
+                continue
+            chosen_jokers = tuple(jokers[:size])
+            for declared_power in range(max(power_floor + 1, 3), 16):
+                results.append((chosen_jokers, declared_power))
     return results
 
 
@@ -529,7 +539,21 @@ def generate_sequence_plays(
     groups, jokers = _group_by_power(hand, e_rev)
     available_powers = sorted(groups.keys())
     if not available_powers:
-        return []
+        num_jokers = len(jokers)
+        if num_jokers < 3:
+            return []
+        results_pure: List[Tuple[Tuple[Card, ...], Dict[int, int]]] = []
+        power_floor = min_power_exclusive if min_power_exclusive is not None else 2
+        sizes_pure = [required_size] if required_size is not None else list(range(3, num_jokers + 1))
+        for size in sizes_pure:
+            if size is None or size < 3 or size > num_jokers:
+                continue
+            highest_start = 15 - size + 1
+            for start in range(power_floor + 1, highest_start + 1):
+                cards: Tuple[Card, ...] = tuple(jokers[:size])
+                joker_map = {position: start + position for position in range(size)}
+                results_pure.append((cards, joker_map))
+        return results_pure
 
     lowest, highest = available_powers[0], available_powers[-1]
     full_range = list(range(lowest, highest + 1))
@@ -547,17 +571,18 @@ def generate_sequence_plays(
             missing = [p for p in window if p not in groups]
             if len(missing) > len(jokers):
                 continue
-            cards: List[Card] = []
+            selected_cards: List[Card] = []
             joker_map: Dict[int, int] = {}
             joker_cursor = 0
             for position, power in enumerate(window):
                 if power in groups:
-                    cards.append(groups[power][0])
+                    selected_cards.append(groups[power][0])
                 else:
-                    cards.append(jokers[joker_cursor])
+                    selected_cards.append(jokers[joker_cursor])
                     joker_map[position] = power
                     joker_cursor += 1
-            results.append((tuple(cards), joker_map))
+            cards: Tuple[Card, ...] = tuple(selected_cards)
+            results.append((cards, joker_map))
     return results
 
 

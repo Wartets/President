@@ -32,6 +32,7 @@ from core.rules_engine import (
 )
 from engine.event_bus import EventBus
 from engine.state import GameState, TrickState
+from events.base import compute_state_hash
 from events.structural import (
     EventHandEmpty, EventPlayerFinished, EventRoundEnd, EventRoundStart,
     EventTrickClosed, EventTrickStart,
@@ -163,7 +164,7 @@ def run_round(
                 timestamp=next_tick(),
                 game_id=game_id,
                 round_id=round_index,
-                state_hash=state.snapshot_key().__repr__(),
+                state_hash=compute_state_hash(state.snapshot_key()),
                 **kwargs,
             )
         )

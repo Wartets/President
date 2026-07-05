@@ -172,6 +172,9 @@ class GameConfig:
         if self.skip_turn_rank not in valid_ranks:
             raise ValueError("skip_turn_rank doit être un rang facial non-Joker.")
 
+        if self.finish_penalty_draw_count < 1:
+            raise ValueError("finish_penalty_draw_count doit être strictement positif.")
+
     def effective_magic_card_enabled(self) -> bool:
         """
         Indique si une règle de clôture magique quelconque est active.
