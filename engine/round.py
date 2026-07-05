@@ -231,6 +231,10 @@ def run_round(
     forced_scum_ref: List[Optional[int]] = [None]
     instant_scum_players: List[int] = []
 
+    # Nombre maximal d'actions tolérées au sein d'un unique pli avant de considérer l'état comme fantôme. Bornée par 8 fois le nombre de
+    # joueurs, marge suffisante pour couvrir toute séquence de passes `ACTION_SOFT_PASS` légitime sous `pass_type == 'ALLOW_SOFT'`.
+    _MAX_ACTIONS_PER_TRICK = max(64, n * 8)
+
     while len(state.finish_order) < n - 1:
         state.trick = TrickState(trick_index=trick_index)
         state.is_equal_forced = False
@@ -240,7 +244,16 @@ def run_round(
         state.current_player_id = opener
         emit(EventTrickStart, opener_id=opener, trick_index=trick_index)
 
+        _actions_in_trick = 0
+
         while not state.trick.is_closed:
+            _actions_in_trick += 1
+            if _actions_in_trick > _MAX_ACTIONS_PER_TRICK:
+                raise RuntimeError(
+                    f"État fantôme détecté : pli {trick_index} de la manche {round_index} "
+                    f"dépasse {_MAX_ACTIONS_PER_TRICK} actions sans clôture. "
+                    f"Partie {game_id} exclue du dataset d'entraînement."
+                )
             pid = state.current_player_id
             if state.is_finished[pid] or not state.is_eligible[pid]:
                 pid = _advance_player(state, n, pid)
