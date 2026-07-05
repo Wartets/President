@@ -1,9 +1,8 @@
 """
 Module de la vue matérialisée de l'état courant.
 
-Le module définit `GameState`, la structure mutable représentant l'état courant de la partie à un instant donné. Conformément au principe d'event
-sourcing de l'architecture, cette structure est une réduction de la séquence d'événements ; elle ne constitue pas la source de vérité mais une
-vue de confort utilisée par le moteur pour évaluer la légalité des actions.
+Le module définit `GameState`, la structure mutable représentant l'état courant de la partie à un instant donné. Cette structure est une vue
+opérationnelle utilisée par le moteur pour évaluer la légalité des actions et appliquer les transitions de manche.
 
 Champs principaux exposés par `GameState` : les mains courantes de chaque joueur, la combinaison et la puissance courantes du pli actif, l'état de
 révolution $E_{rev}$ et son verrouillage $L_{rev}$, l'état d'égalité forcée, l'éligibilité de chaque joueur pour le pli courant, l'index du joueur
@@ -30,6 +29,9 @@ class TrickState:
     Champ `last_player_id` : identifiant du dernier joueur ayant validé `ACTION_PLAY`, `None` avant toute pose.
     Champ `is_sequence` : indique si la combinaison active est une suite.
     Champ `sequence_min_power` : puissance minimale de la suite active, utilisée pour la condition de surenchère des suites.
+    Champ `passes_since_last_play` : nombre de passes observées depuis la dernière pose valide.
+    Champ `last_play_e_rev_before` : état de révolution avant la dernière pose valide.
+    Champ `last_play_triggered_revolution` : indique si la dernière pose valide a modifié l'état de révolution.
     Champ `is_closed` : indique si le pli est clos.
     Champ `trick_index` : index du pli au sein de la manche courante.
     """
@@ -39,6 +41,9 @@ class TrickState:
     last_player_id: Optional[int] = None
     is_sequence: bool = False
     sequence_min_power: Optional[int] = None
+    passes_since_last_play: int = 0
+    last_play_e_rev_before: bool = False
+    last_play_triggered_revolution: bool = False
     is_closed: bool = False
     trick_index: int = 0
 
@@ -123,6 +128,9 @@ class GameState:
             self.trick.size,
             self.trick.current_power,
             self.trick.last_player_id,
+            self.trick.passes_since_last_play,
+            self.trick.last_play_e_rev_before,
+            self.trick.last_play_triggered_revolution,
             self.trick.is_closed,
         )
 

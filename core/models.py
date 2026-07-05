@@ -112,7 +112,7 @@ class Hand:
     Main immuable d'un joueur.
 
     La main est une collection ordonnée de cartes. Toute opération de retrait ou d'ajout produit une nouvelle instance ; aucune mutation en place n'est
-    effectuée, conformément au principe d'event sourcing de l'architecture.
+    effectuée.
 
     Champ `cards` : tuple de `Card` composant la main.
     """

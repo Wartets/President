@@ -10,7 +10,7 @@ Le module dépend de `core.config`, `agents.interface`, `engine.event_bus`, `eng
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import numpy as np
 
@@ -19,6 +19,63 @@ from core.config import GameConfig
 from engine.event_bus import EventBus
 from engine.round import run_round
 from events.structural import EventGameConfig, EventGameStart
+
+
+VectorizedPolicy = Callable[[np.ndarray, np.ndarray], np.ndarray]
+
+
+def vectorized_run(
+    config: GameConfig,
+    batch_size: int,
+    max_steps: int,
+    base_seed: int = 0,
+    policy: Optional[VectorizedPolicy] = None,
+) -> Dict[str, np.ndarray]:
+    """
+    Exécute un lot de manches sur le moteur tensoriel.
+
+    Paramètre `config` : configuration de partie.
+    Paramètre `batch_size` : nombre de manches simulées simultanément, entier strictement positif.
+    Paramètre `max_steps` : nombre maximal de transitions avant arrêt, entier strictement positif.
+    Paramètre `base_seed` : graine de distribution du lot.
+    Paramètre `policy` : fonction optionnelle recevant `(state_tensor, legal_mask)` et retournant un tableau d'index d'action `(B,)`.
+    Retourne un dictionnaire de tableaux `numpy` contenant les rangs de sortie, le statut de fin, les récompenses cumulées et le nombre de
+    transitions exécutées. Aucun événement n'est publié.
+    """
+    from training.fast_path import ACTION_PASS, FastPathEngine
+
+    engine = FastPathEngine(config, batch_size=batch_size)
+    state = engine.reset(base_seed)
+    cumulative_reward = np.zeros(batch_size, dtype=np.float64)
+    steps_executed = 0
+
+    for step in range(max_steps):
+        legal_mask = engine.legal_action_mask()
+        if policy is None:
+            actions = np.full(batch_size, ACTION_PASS, dtype=np.int64)
+            has_action = np.any(legal_mask, axis=1)
+            actions[has_action] = np.argmax(legal_mask[has_action], axis=1)
+        else:
+            actions = np.asarray(policy(engine.state_tensor(), legal_mask), dtype=np.int64)
+            if actions.shape != (batch_size,):
+                raise ValueError("policy doit retourner un tableau de forme (batch_size,).")
+            invalid = (actions < 0) | (actions >= engine.action_space_size())
+            row_index = np.arange(batch_size)
+            invalid |= (actions != ACTION_PASS) & ~legal_mask[row_index, np.clip(actions, 0, engine.action_space_size() - 1)]
+            actions[invalid] = ACTION_PASS
+
+        state, reward, done = engine.step(actions)
+        cumulative_reward += reward
+        steps_executed = step + 1
+        if bool(np.all(done)):
+            break
+
+    return {
+        "finish_rank": state.finish_rank.copy(),
+        "done": state.done.copy(),
+        "reward": cumulative_reward,
+        "steps": np.array([steps_executed], dtype=np.int64),
+    }
 
 
 class Game:
@@ -102,7 +159,7 @@ class Game:
         Paramètre `count` : nombre de manches à exécuter, entier positif.
         Retourne un tableau `numpy.ndarray` de type `float64` et de forme `(count, player_count)`, où l'élément d'indice `[i, pid]` est le
         point de victoire attribué au joueur `pid` à l'issue de la manche d'index `i`. Destiné aux pipelines d'entraînement consommant des
-        tenseurs plutôt que des dictionnaires Python, conformément à la séparation Fast-Path / Slow-Path. Mêmes effets de bord que
+        tenseurs plutôt que des dictionnaires Python. Mêmes effets de bord que
         `play_round`, répétés `count` fois.
         """
         n = self.config.player_count
@@ -112,3 +169,27 @@ class Game:
             for pid, vp in vp_by_player.items():
                 vp_tensor[i, pid] = vp
         return vp_tensor
+
+    def vectorized_run(
+        self,
+        batch_size: int,
+        max_steps: int,
+        base_seed: Optional[int] = None,
+        policy: Optional[VectorizedPolicy] = None,
+    ) -> Dict[str, np.ndarray]:
+        """
+        Exécute un lot de manches via le moteur tensoriel associé à la configuration de la partie.
+
+        Paramètre `batch_size` : nombre de manches simulées simultanément.
+        Paramètre `max_steps` : nombre maximal de transitions avant arrêt.
+        Paramètre `base_seed` : graine de distribution du lot, `config.random_seed` si `None`.
+        Paramètre `policy` : fonction optionnelle de sélection d'action vectorisée.
+        Retourne le résultat de `vectorized_run`. Aucun état de `Game` n'est modifié.
+        """
+        return vectorized_run(
+            self.config,
+            batch_size=batch_size,
+            max_steps=max_steps,
+            base_seed=self.config.random_seed if base_seed is None else base_seed,
+            policy=policy,
+        )

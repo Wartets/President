@@ -1,17 +1,13 @@
 """
-Module du moteur d'entraînement vectorisé (Fast-Path).
+Module du moteur d'entraînement vectorisé.
 
-Le module implémente `FastPathEngine`, un environnement de simulation par lots opérant exclusivement sur des tenseurs `numpy`, sans
-instanciation d'objets `Card`/`Hand`, conformément à la séparation Fast-Path / Slow-Path. L'environnement traite `B`
-parties indépendantes en lock-step : à chaque appel de `step`, l'ensemble des `B` joueurs courants agissent simultanément, ce qui permet
-une évaluation vectorisée unique de la légalité et de la transition d'état, sans boucle Python sur les parties.
+Le module implémente `FastPathEngine`, un environnement de simulation par lots opérant sur des tableaux `numpy`. L'environnement traite `B`
+manches indépendantes en lock-step : à chaque appel de `step`, l'ensemble des joueurs courants agissent simultanément, ce qui permet
+une évaluation groupée de la légalité et des transitions d'état.
 
-Hypothèses de fonctionnement (simplifications volontaires du Fast-Path par rapport au moteur `Event Sourcing`) :
-La main d'un joueur est représentée par un vecteur de comptage par rang, les couleurs (`Suit`) ne sont pas modélisées : les règles ne
-dépendant que de `f_power` restent exactes, celles dépendant de la couleur (résolution d'égalité, interception) sont hors du périmètre du
-Fast-Path. Les suites, le saut de tour, l'interception, le Putsch, l'échange de cartes et les pénalités de sortie étendues ne sont pas
-implémentés ; seules les combinaisons uniformes, la révolution, la substitution par Joker et la clôture magique sur le rang deux sont
-prises en charge. La taille du paquet est supposée divisible par `player_count` ; le reste éventuel de la division est ignoré.
+La main d'un joueur est représentée par un vecteur de comptage par rang. Les couleurs ne sont pas représentées dans cet espace tensoriel.
+Les transitions couvrent les poses uniformes, les Jokers, la révolution, la double révolution, la clôture magique, les passes dures et les
+passes souples avec fermeture par nombre de réponses.
 
 Le module dépend de `core.config` pour `GameConfig` et de `numpy`. Aucun effet de bord global.
 """
@@ -78,10 +74,13 @@ class FastPathState:
     Champ `hands` : tableau `(B, N, 14)` d'entiers, comptage de cartes par joueur et par rang, les treize premières colonnes couvrant les
     rangs standard et la dernière les Jokers.
     Champ `e_rev` : tableau `(B,)` booléen, état de révolution par partie.
+    Champ `l_rev` : tableau `(B,)` booléen, verrouillage de la révolution par partie.
     Champ `trick_size` : tableau `(B,)` d'entiers, taille imposée du pli courant, nul si le pli est vide.
     Champ `trick_power` : tableau `(B,)` d'entiers, puissance courante du pli, moins un si le pli est vide.
     Champ `last_player` : tableau `(B,)` d'entiers, identifiant du dernier joueur ayant posé une combinaison, moins un si aucun.
     Champ `current_player` : tableau `(B,)` d'entiers, identifiant du joueur devant agir.
+    Champ `passes_since_last_play` : tableau `(B,)` d'entiers, nombre de passes depuis la dernière pose valide.
+    Champ `actions_in_trick` : tableau `(B,)` d'entiers, nombre de transitions dans le pli courant.
     Champ `eligible` : tableau `(B, N)` booléen, éligibilité au pli courant.
     Champ `is_finished` : tableau `(B, N)` booléen, joueurs ayant vidé leur main pour la manche courante.
     Champ `finish_rank` : tableau `(B, N)` d'entiers, index de sortie attribué à chaque joueur, moins un si non encore sorti.
@@ -91,10 +90,13 @@ class FastPathState:
 
     hands: np.ndarray
     e_rev: np.ndarray
+    l_rev: np.ndarray
     trick_size: np.ndarray
     trick_power: np.ndarray
     last_player: np.ndarray
     current_player: np.ndarray
+    passes_since_last_play: np.ndarray
+    actions_in_trick: np.ndarray
     eligible: np.ndarray
     is_finished: np.ndarray
     finish_rank: np.ndarray
@@ -147,14 +149,13 @@ class FastPathEngine:
 
         Paramètre `base_seed` : graine de base, chaque partie du lot recevant une graine dérivée distincte via `numpy.random.default_rng`.
         Retourne l'instance de `FastPathState` construite. Effet de bord : remplace `self.state`. La distribution des cartes utilise une
-        permutation aléatoire vectorisée d'étiquettes de rang, sans modélisation individuelle des couleurs.
+        permutation aléatoire vectorisée d'étiquettes de rang et attribue toutes les cartes disponibles.
         """
         n = self.config.player_count
         decks = max(1, (n - 1) // 4 + 1) if self.config.deck_scaling_auto else (self.config.forced_deck_count or 1)
         std_per_rank = 4 * decks
         joker_count_total = 2 * decks if self.config.use_jokers else 0
         total_cards = std_per_rank * _NUM_STD_RANKS + joker_count_total
-        hand_size = total_cards // n
 
         rng = np.random.default_rng(base_seed)
         labels = np.concatenate([
@@ -168,17 +169,20 @@ class FastPathEngine:
 
         hands = np.zeros((self.batch_size, n, _HAND_COLUMNS), dtype=np.int32)
         for pid in range(n):
-            segment = shuffled[:, pid * hand_size:(pid + 1) * hand_size]
+            segment = shuffled[:, pid::n]
             for rank in range(_HAND_COLUMNS):
                 hands[:, pid, rank] = np.sum(segment == rank, axis=1)
 
         self.state = FastPathState(
             hands=hands,
             e_rev=np.zeros(self.batch_size, dtype=bool),
+            l_rev=np.zeros(self.batch_size, dtype=bool),
             trick_size=np.zeros(self.batch_size, dtype=np.int32),
             trick_power=np.full(self.batch_size, -1, dtype=np.int32),
             last_player=np.full(self.batch_size, -1, dtype=np.int32),
-            current_player=np.zeros(self.batch_size, dtype=np.int32),
+            current_player=np.full(self.batch_size, self.config.first_trick_opener_id, dtype=np.int32),
+            passes_since_last_play=np.zeros(self.batch_size, dtype=np.int32),
+            actions_in_trick=np.zeros(self.batch_size, dtype=np.int32),
             eligible=np.ones((self.batch_size, n), dtype=bool),
             is_finished=np.zeros((self.batch_size, n), dtype=bool),
             finish_rank=np.full((self.batch_size, n), -1, dtype=np.int32),
@@ -196,6 +200,8 @@ class FastPathEngine:
         non nul, et si sa puissance résultante dépasse strictement `trick_power` lorsque celui-ci est défini. Aucun effet de bord.
         """
         state = self.state
+        if state is None:
+            raise RuntimeError("reset doit être appelé avant legal_action_mask.")
         n = self.config.player_count
         b = self.batch_size
         cp = state.current_player
@@ -225,9 +231,46 @@ class FastPathEngine:
             col = _JOKER_COLUMN * self.max_combo_size + size_offset
             mask[:, col] = joker_reachable[:, size_offset] & required_ok & power_ok_joker
 
+        inactive = state.done | state.is_finished[np.arange(b), cp] | ~state.eligible[np.arange(b), cp]
+        mask[inactive, :] = False
         no_option = ~np.any(mask, axis=1)
         mask[no_option, :] = False
         return mask
+
+    def state_tensor(self) -> np.ndarray:
+        """
+        Convertit l'état courant en matrice de caractéristiques à taille fixe.
+
+        Retourne un tableau `(B, F)` de type `float32`. Les colonnes contiennent les mains aplaties, l'état de révolution, l'état du pli,
+        les joueurs courants, l'éligibilité, les sorties et les rangs de fin. Aucun effet de bord.
+        """
+        state = self.state
+        if state is None:
+            raise RuntimeError("reset doit être appelé avant state_tensor.")
+        n = self.config.player_count
+        scalar = np.stack(
+            [
+                state.e_rev.astype(np.float32),
+                state.l_rev.astype(np.float32),
+                state.trick_size.astype(np.float32) / max(self.max_combo_size, 1),
+                np.maximum(state.trick_power, 0).astype(np.float32) / 16.0,
+                state.current_player.astype(np.float32) / max(n - 1, 1),
+                np.maximum(state.last_player, 0).astype(np.float32) / max(n - 1, 1),
+                state.passes_since_last_play.astype(np.float32) / max(n - 1, 1),
+                state.done.astype(np.float32),
+            ],
+            axis=1,
+        )
+        return np.concatenate(
+            [
+                state.hands.reshape(self.batch_size, -1).astype(np.float32),
+                state.eligible.astype(np.float32),
+                state.is_finished.astype(np.float32),
+                np.maximum(state.finish_rank, 0).astype(np.float32) / max(n - 1, 1),
+                scalar,
+            ],
+            axis=1,
+        )
 
     def step(self, action_index: np.ndarray) -> Tuple[FastPathState, np.ndarray, np.ndarray]:
         """
@@ -240,12 +283,16 @@ class FastPathEngine:
         `done` un tableau `(B,)` booléen indiquant la fin de manche. Effet de bord : mute `self.state` en place.
         """
         state = self.state
+        if state is None:
+            raise RuntimeError("reset doit être appelé avant step.")
         n = self.config.player_count
         b = self.batch_size
         cp = state.current_player
         reward = np.zeros(b, dtype=np.float64)
+        active_rows = ~state.done
+        state.actions_in_trick[active_rows] += 1
 
-        is_play = action_index != ACTION_PASS
+        is_play = (action_index != ACTION_PASS) & active_rows
         rank_index, size = self._decode_action(np.clip(action_index, 0, self.action_space_size() - 1))
 
         for row in np.nonzero(is_play)[0]:
@@ -267,8 +314,22 @@ class FastPathEngine:
                 state.trick_size[row] = take
             state.trick_power[row] = power
             state.last_player[row] = pid
+            state.passes_since_last_play[row] = 0
 
-            if self.config.revolution_enabled and take >= 4 and rank != _JOKER_COLUMN:
+            if (
+                self.config.double_revolution_enabled
+                and not state.l_rev[row]
+                and take >= 8
+                and rank != _JOKER_COLUMN
+            ):
+                state.e_rev[row] = not state.e_rev[row]
+                state.l_rev[row] = True
+            elif (
+                self.config.revolution_enabled
+                and not state.l_rev[row]
+                and take >= 4
+                and rank != _JOKER_COLUMN
+            ):
                 state.e_rev[row] = not state.e_rev[row]
 
             magic_index = int(_effective_magic_rank_index(self.config, state.e_rev[row:row + 1])[0])
@@ -285,8 +346,12 @@ class FastPathEngine:
                 )
                 state.next_finish_index[row] += 1
 
-        for row in np.nonzero(~is_play)[0]:
-            state.eligible[row, cp[row]] = False
+        pass_rows = np.nonzero((~is_play) & active_rows)[0]
+        for row in pass_rows:
+            if self.config.pass_type == "HARD_ONLY":
+                state.eligible[row, cp[row]] = False
+            if state.last_player[row] >= 0 and cp[row] != state.last_player[row]:
+                state.passes_since_last_play[row] += 1
 
         for row in range(b):
             if state.done[row]:
@@ -298,11 +363,15 @@ class FastPathEngine:
             trick_closes = state.last_player[row] >= 0 and all(
                 not state.eligible[row, pid] for pid in active_others
             )
+            if state.last_player[row] >= 0 and state.passes_since_last_play[row] >= len(active_others):
+                trick_closes = True
             if trick_closes:
                 winner = state.last_player[row]
                 state.trick_size[row] = 0
                 state.trick_power[row] = -1
                 state.last_player[row] = -1
+                state.passes_since_last_play[row] = 0
+                state.actions_in_trick[row] = 0
                 active = [pid for pid in range(n) if not state.is_finished[row, pid]]
                 state.eligible[row, :] = False
                 for pid in active:

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import time
 from typing import Any, Dict, List, Type
 
@@ -139,9 +140,12 @@ def launch_research(
 
     logger = EventLogger()
     logger._parquet_buffer = all_records
-    if os.path.exists(output_parquet):
+    if os.path.isdir(output_parquet):
+        shutil.rmtree(output_parquet)
+    elif os.path.exists(output_parquet):
         os.remove(output_parquet)
     logger.flush_to_parquet(output_parquet)
+    logger.close()
 
     table = Table(title=f"Campagne de recherche, profil {agent_profile}")
     table.add_column("Métrique")

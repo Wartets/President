@@ -103,6 +103,31 @@ def _putsch_condition_met(hand: Hand, e_rev: bool) -> bool:
     return f_power(top[0], e_rev) <= 10
 
 
+def _validated_exchange_cards(hand: Hand, chosen: List[Card], count: int, e_rev: bool) -> Tuple[Card, ...]:
+    """
+    Normalise une sélection de cartes d'échange.
+
+    Paramètre `hand` : main source.
+    Paramètre `chosen` : cartes retournées par l'agent.
+    Paramètre `count` : nombre exact de cartes attendues.
+    Paramètre `e_rev` : état de révolution utilisé pour la sélection de repli.
+    Retourne un tuple de cartes appartenant à `hand`, de taille `count`. La sélection de repli prend les cartes de plus faible puissance.
+    Aucun effet de bord.
+    """
+    remaining = list(hand.cards)
+    normalized: List[Card] = []
+    for card in chosen:
+        if card in remaining:
+            normalized.append(card)
+            remaining.remove(card)
+        if len(normalized) == count:
+            break
+    if len(normalized) == count:
+        return tuple(normalized)
+    ordered = sorted(remaining, key=lambda c: (f_power(c, e_rev), repr(c)))
+    return tuple(normalized + ordered[: count - len(normalized)])
+
+
 def run_round(
     config: GameConfig,
     agents: Dict[int, AbstractBaseAgent],
@@ -214,10 +239,11 @@ def run_round(
             if giver is None or receiver is None:
                 continue
             chosen = agents[giver].choose_exchange_cards(state.hands[giver], state, count)
-            emit(EventExchangeIntent, from_player=giver, to_player=receiver, offered_cards=tuple(chosen))
-            state.hands[giver] = state.hands[giver].without(tuple(chosen))
-            state.hands[receiver] = state.hands[receiver].with_added(tuple(chosen))
-            emit(EventExchange, from_player=giver, to_player=receiver, cards=tuple(chosen), was_blind_tax=False)
+            cards = _validated_exchange_cards(state.hands[giver], chosen, count, state.e_rev)
+            emit(EventExchangeIntent, from_player=giver, to_player=receiver, offered_cards=cards)
+            state.hands[giver] = state.hands[giver].without(cards)
+            state.hands[receiver] = state.hands[receiver].with_added(cards)
+            emit(EventExchange, from_player=giver, to_player=receiver, cards=cards, was_blind_tax=False)
 
     # Phase de jeu---
     if round_index == 0:
@@ -231,8 +257,7 @@ def run_round(
     forced_scum_ref: List[Optional[int]] = [None]
     instant_scum_players: List[int] = []
 
-    # Nombre maximal d'actions tolérées au sein d'un unique pli avant de considérer l'état comme fantôme. Bornée par 8 fois le nombre de
-    # joueurs, marge suffisante pour couvrir toute séquence de passes `ACTION_SOFT_PASS` légitime sous `pass_type == 'ALLOW_SOFT'`.
+    # Limite de transitions d'un pli avant arrêt de sécurité.
     _MAX_ACTIONS_PER_TRICK = max(64, n * 8)
 
     while len(state.finish_order) < n - 1:
@@ -250,9 +275,9 @@ def run_round(
             _actions_in_trick += 1
             if _actions_in_trick > _MAX_ACTIONS_PER_TRICK:
                 raise RuntimeError(
-                    f"État fantôme détecté : pli {trick_index} de la manche {round_index} "
+                    f"État incohérent détecté : pli {trick_index} de la manche {round_index} "
                     f"dépasse {_MAX_ACTIONS_PER_TRICK} actions sans clôture. "
-                    f"Partie {game_id} exclue du dataset d'entraînement."
+                    f"Partie {game_id} exclue des résultats d'entraînement."
                 )
             pid = state.current_player_id
             if state.is_finished[pid] or not state.is_eligible[pid]:
@@ -302,19 +327,41 @@ def run_round(
                     was_suboptimal = True
 
             if action.action_type == ActionType.ACTION_PLAY:
-                _apply_play(state, config, agents, pid, action, emit)
+                interception_finish = _apply_play(state, config, agents, pid, action, emit)
                 emit(
                     EventActionPlayed,
                     player_id=pid,
                     action_type=action.action_type,
                     cards_played=action.cards,
-                    resulting_power=combination_power(action.cards, state.e_rev, action.declared_power)
-                    if not state.trick.is_sequence
-                    else None,
+                    resulting_power=state.trick.current_power if not state.trick.is_sequence else None,
                     was_suboptimal=was_suboptimal,
                 )
                 if state.hands[pid].is_empty() and not state.is_finished[pid]:
-                    _finish_player(state, config, pid, action, emit, forced_scum_ref, instant_scum_players)
+                    _finish_player(
+                        state,
+                        config,
+                        pid,
+                        action,
+                        emit,
+                        forced_scum_ref,
+                        instant_scum_players,
+                        state.trick.last_play_e_rev_before,
+                        state.trick.last_play_triggered_revolution,
+                    )
+                if interception_finish is not None:
+                    interceptor_id, interception_action = interception_finish
+                    if state.hands[interceptor_id].is_empty() and not state.is_finished[interceptor_id]:
+                        _finish_player(
+                            state,
+                            config,
+                            interceptor_id,
+                            interception_action,
+                            emit,
+                            forced_scum_ref,
+                            instant_scum_players,
+                            state.e_rev,
+                            False,
+                        )
             else:
                 if action.action_type == ActionType.ACTION_HARD_PASS:
                     state.is_eligible[pid] = False
@@ -323,6 +370,8 @@ def run_round(
                     if config.pass_type != "ALLOW_SOFT":
                         state.is_eligible[pid] = False
                     was_suboptimal = was_suboptimal or _has_any_legal_play(state.hands[pid], state.e_rev, config)
+                if state.trick.last_player_id is not None and pid != state.trick.last_player_id:
+                    state.trick.passes_since_last_play += 1
                 emit(
                     EventActionPlayed,
                     player_id=pid,
@@ -418,10 +467,19 @@ def _trick_should_close(state: GameState, n: int) -> bool:
     others = [pid for pid in active if pid != state.trick.last_player_id]
     if not others:
         return True
+    if state.trick.passes_since_last_play >= len(others):
+        return True
     return all(not state.is_eligible.get(pid, False) for pid in others)
 
 
-def _apply_play(state: GameState, config: GameConfig, agents, pid: int, action: Action, emit) -> None:
+def _apply_play(
+    state: GameState,
+    config: GameConfig,
+    agents,
+    pid: int,
+    action: Action,
+    emit,
+) -> Optional[Tuple[int, Action]]:
     """
     Applique une action `ACTION_PLAY` validée à l'état courant.
 
@@ -431,7 +489,7 @@ def _apply_play(state: GameState, config: GameConfig, agents, pid: int, action: 
     Paramètre `pid` : identifiant du joueur ayant posé la combinaison.
     Paramètre `action` : action validée à appliquer.
     Paramètre `emit` : fonction de publication d'événement liée à la manche courante.
-    Retourne `None`. Effet de bord : retire les cartes jouées de la main du joueur, met à jour la taille et la puissance du pli, applique les
+    Retourne l'action d'interception appliquée lorsqu'elle vide la main d'un intercepteur, ou `None`. Effet de bord : retire les cartes jouées de la main du joueur, met à jour la taille et la puissance du pli, applique les
     déclenchements de révolution, de double révolution, de clôture magique et de saut de tour, et déclenche le broadcast d'interception lorsque
     pertinent.
     """
@@ -463,26 +521,31 @@ def _apply_play(state: GameState, config: GameConfig, agents, pid: int, action: 
         state.trick.current_power = new_power
 
     state.trick.last_player_id = pid
+    state.trick.passes_since_last_play = 0
+    state.trick.last_play_e_rev_before = state.e_rev
+    state.trick.last_play_triggered_revolution = False
     state.is_equal_forced = bool(
         config.skip_on_equal and previous_power is not None and new_power == previous_power
     )
     if state.is_equal_forced:
         emit(EventRuleTriggered, rule_name="EQUAL_FORCED", triggering_player_id=pid)
 
-    if triggers_revolution(action.cards, config, is_sequence_play):
-        state.e_rev = not state.e_rev
-        emit(
-            EventRuleTriggered,
-            rule_name="REVOLUTION",
-            triggering_player_id=pid,
-            magnitude=len(action.cards),
-        )
-    if triggers_double_revolution(action.cards, config, is_sequence_play):
+    if not state.l_rev and triggers_double_revolution(action.cards, config, is_sequence_play):
         state.e_rev = not state.e_rev
         state.l_rev = True
+        state.trick.last_play_triggered_revolution = True
         emit(
             EventRuleTriggered,
             rule_name="DOUBLE_REVOLUTION",
+            triggering_player_id=pid,
+            magnitude=len(action.cards),
+        )
+    elif not state.l_rev and triggers_revolution(action.cards, config, is_sequence_play):
+        state.e_rev = not state.e_rev
+        state.trick.last_play_triggered_revolution = True
+        emit(
+            EventRuleTriggered,
+            rule_name="REVOLUTION",
             triggering_player_id=pid,
             magnitude=len(action.cards),
         )
@@ -501,7 +564,12 @@ def _apply_play(state: GameState, config: GameConfig, agents, pid: int, action: 
         intercepted_card = None
         for candidate in candidates:
             accepted, twin = agents[candidate].on_interception_opportunity(state, action.cards[0])
-            if accepted and twin is not None and can_intercept(action.cards[0], twin, config):
+            if (
+                accepted
+                and twin is not None
+                and twin in state.hands[candidate].cards
+                and can_intercept(action.cards[0], twin, config)
+            ):
                 interceptor_id = candidate
                 intercepted_card = twin
                 break
@@ -510,10 +578,23 @@ def _apply_play(state: GameState, config: GameConfig, agents, pid: int, action: 
             if intercepted_card is not None:
                 state.hands[interceptor_id] = state.hands[interceptor_id].without((intercepted_card,))
                 state.trick.last_player_id = interceptor_id
+                state.trick.passes_since_last_play = 0
                 state.current_player_id = interceptor_id
                 emit(EventRuleTriggered, rule_name="INTERCEPTION", triggering_player_id=interceptor_id)
+                emit(
+                    EventActionPlayed,
+                    player_id=interceptor_id,
+                    action_type=ActionType.ACTION_PLAY,
+                    cards_played=(intercepted_card,),
+                    resulting_power=combination_power((intercepted_card,), state.e_rev, None),
+                    was_suboptimal=False,
+                )
                 if config.interception_closes_trick:
                     state.trick.is_closed = True
+                return interceptor_id, Action(
+                    action_type=ActionType.ACTION_PLAY,
+                    cards=(intercepted_card,),
+                )
 
     if not state.trick.is_closed:
         skip_count = triggers_skip_turn(action.cards, config)
@@ -531,6 +612,8 @@ def _apply_play(state: GameState, config: GameConfig, agents, pid: int, action: 
                     state.is_eligible[skip_target] = False
             state.current_player_id = skip_target
 
+    return None
+
 
 def _finish_player(
     state: GameState,
@@ -540,6 +623,8 @@ def _finish_player(
     emit,
     forced_scum_ref: List[Optional[int]],
     instant_scum_players: List[int],
+    e_rev_before: Optional[bool] = None,
+    triggered_revolution: Optional[bool] = None,
 ) -> None:
     """
     Traite la sortie d'un joueur ayant vidé sa main.
@@ -551,6 +636,8 @@ def _finish_player(
     Paramètre `emit` : fonction de publication d'événement liée à la manche courante.
     Paramètre `forced_scum_ref` : liste à un élément, mutée en place, portant l'identifiant du joueur devant être forcé au rôle `ROLE_SCUM` la manche
     suivante lorsque `finish_penalty_extended` est vrai et que la sortie satisfait `matches_finish_penalty`.
+    Paramètre `e_rev_before` : état de révolution avant la pose de sortie, `state.e_rev` si `None`.
+    Paramètre `triggered_revolution` : indique si la pose de sortie a modifié l'état de révolution, recalculé si `None`.
     Retourne `None`. Effet de bord : marque le joueur comme sorti, l'ajoute à `finish_order`, et publie `EventHandEmpty` et `EventPlayerFinished`. Si
     `finish_penalty_enabled` est vrai, que la sortie satisfait `matches_finish_penalty` et que `finish_penalty_type` vaut
     `PENALTY_DRAW_CARDS`, une partie de la combinaison jouée est réintégrée dans la main du joueur, annulant la sortie pour ce tour. Si
@@ -559,8 +646,14 @@ def _finish_player(
     `PENALTY_INSTANT_SCUM`, `pid` est ajouté à `instant_scum_players`, son rôle et son point de victoire de la manche courante étant alors
     substitués par ceux du dernier index de sortie.
     """
-    triggered_revolution = triggers_revolution(action.cards, config, state.trick.is_sequence)
-    penalty_condition = matches_finish_penalty(action.cards, config, state.e_rev, triggered_revolution)
+    if triggered_revolution is None:
+        triggered_revolution = (
+            triggers_revolution(action.cards, config, state.trick.is_sequence)
+            or triggers_double_revolution(action.cards, config, state.trick.is_sequence)
+        )
+    if e_rev_before is None:
+        e_rev_before = state.e_rev
+    penalty_condition = matches_finish_penalty(action.cards, config, e_rev_before, triggered_revolution)
 
     if config.finish_penalty_extended and penalty_condition:
         forced_scum_ref[0] = pid

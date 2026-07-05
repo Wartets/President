@@ -26,8 +26,7 @@ from engine.state import GameState
 # Nombre de rollouts simulés par option candidate évaluée par l'agent.
 _DEFAULT_ROLLOUT_COUNT = 24
 
-# Nombre maximal de demi-coups simulés par rollout avant arrêt forcé,
-# protection contre tout état fantôme durant la simulation interne.
+# Nombre maximal de demi-coups simulés par rollout avant arrêt forcé.
 _MAX_ROLLOUT_STEPS = 400
 
 
