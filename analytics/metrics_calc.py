@@ -19,6 +19,10 @@ Le module dépend de `analytics.event_logger` pour le type `EventLogger`, de `co
 from __future__ import annotations
 
 import math
+
+import numba
+import numpy as np
+
 from collections import Counter, defaultdict
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -38,20 +42,37 @@ from events.transactional import (
 
 # Métriques macro (échelle de la partie / des rounds)
 
+@numba.njit(cache=True)
+def _gini_from_sorted(values: np.ndarray) -> float:
+    """
+    Calcule l'indice de Gini d'un tableau de valeurs déjà triées par ordre croissant.
+
+    Paramètre `values` : tableau numpy de type `float64`, valeurs triées par ordre croissant, taille quelconque positive ou nulle.
+    Retourne un nombre, domaine $[0, 1]$, nul si le tableau est vide, si sa somme est nulle, ou si toutes les valeurs sont égales,
+    croissant avec l'inégalité de répartition. Complexité linéaire en la taille du tableau. Aucun effet de bord. Fonction compilée en code
+    machine par Numba, sans dépendance à l'interpréteur Python lors de l'exécution.
+    """
+    n = values.shape[0]
+    total = 0.0
+    cumulative = 0.0
+    for i in range(n):
+        total += values[i]
+        cumulative += (i + 1) * values[i]
+    if n == 0 or total == 0.0:
+        return 0.0
+    return (2.0 * cumulative) / (n * total) - (n + 1) / n
+
+
 def gini_initial_hand_power(hand_powers_by_player: Dict[int, float]) -> float:
     """
     Calcule l'indice de Gini de la puissance de main initiale entre joueurs.
 
     Paramètre `hand_powers_by_player` : association entre identifiant de joueur et somme des puissances standard de sa main initiale.
-    Retourne un nombre, domaine $[0, 1]$, nul si toutes les valeurs sont égales, croissant avec l'inégalité de répartition. Aucun effet de bord.
+    Retourne un nombre, domaine $[0, 1]$, nul si toutes les valeurs sont égales, croissant avec l'inégalité de répartition. Délègue le
+    calcul à `_gini_from_sorted` après tri et conversion en tableau `numpy.ndarray`. Aucun effet de bord.
     """
-    values = sorted(hand_powers_by_player.values())
-    n = len(values)
-    if n == 0 or sum(values) == 0:
-        return 0.0
-    cumulative = sum((i + 1) * v for i, v in enumerate(values))
-    total = sum(values)
-    return (2 * cumulative) / (n * total) - (n + 1) / n
+    values = np.array(sorted(hand_powers_by_player.values()), dtype=np.float64)
+    return float(_gini_from_sorted(values))
 
 
 def role_transition_matrix(role_sequence: Sequence[Dict[int, str]]) -> Dict[Tuple[str, str], float]:
@@ -130,6 +151,36 @@ def putsch_efficiency_rate(logger: EventLogger) -> Dict[str, float]:
     return result
 
 
+@numba.njit(cache=True)
+def _pearson_correlation_jit(xs: np.ndarray, ys: np.ndarray) -> float:
+    """
+    Calcule le coefficient de corrélation de Pearson entre deux tableaux numériques appariés.
+
+    Paramètre `xs` : tableau numpy de type `float64`, première série de valeurs.
+    Paramètre `ys` : tableau numpy de type `float64`, seconde série de valeurs, de même taille que `xs`.
+    Retourne un nombre, domaine $[-1, 1]$, nul si moins de deux points sont disponibles ou si l'écart type d'une des deux séries est nul.
+    Complexité linéaire en la taille des tableaux. Aucun effet de bord. Fonction compilée en code machine par Numba, sans dépendance à
+    l'interpréteur Python lors de l'exécution.
+    """
+    n = xs.shape[0]
+    if n < 2:
+        return 0.0
+    mean_x = np.mean(xs)
+    mean_y = np.mean(ys)
+    cov = 0.0
+    var_x = 0.0
+    var_y = 0.0
+    for i in range(n):
+        dx = xs[i] - mean_x
+        dy = ys[i] - mean_y
+        cov += dx * dy
+        var_x += dx * dx
+        var_y += dy * dy
+    if var_x == 0.0 or var_y == 0.0:
+        return 0.0
+    return cov / (var_x * var_y) ** 0.5
+
+
 def _pearson_correlation(xs: List[float], ys: List[float]) -> float:
     """
     Calcule le coefficient de corrélation de Pearson entre deux séries appariées.
@@ -137,19 +188,13 @@ def _pearson_correlation(xs: List[float], ys: List[float]) -> float:
     Paramètre `xs` : première série de valeurs numériques.
     Paramètre `ys` : seconde série de valeurs numériques, de même taille que `xs`.
     Retourne un nombre, domaine $[-1, 1]$, nul si moins de deux points sont disponibles ou si l'écart type d'une des deux séries est nul.
-    Aucun effet de bord.
+    Délègue le calcul à `_pearson_correlation_jit` après conversion en tableaux `numpy.ndarray`. Aucun effet de bord.
     """
-    n = len(xs)
-    if n < 2:
+    if len(xs) < 2:
         return 0.0
-    mean_x = sum(xs) / n
-    mean_y = sum(ys) / n
-    cov = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
-    var_x = sum((x - mean_x) ** 2 for x in xs)
-    var_y = sum((y - mean_y) ** 2 for y in ys)
-    if var_x == 0 or var_y == 0:
-        return 0.0
-    return cov / (var_x * var_y) ** 0.5
+    return float(
+        _pearson_correlation_jit(np.array(xs, dtype=np.float64), np.array(ys, dtype=np.float64))
+    )
 
 
 def tax_weight_vp_correlation(logger: EventLogger) -> float:

@@ -117,6 +117,18 @@ class EventLogger:
 
         return pd.DataFrame(self.to_records())
 
+    def to_polars_dataframe(self):
+        """
+        Convertit le journal en `DataFrame` Polars.
+
+        Retourne un objet `polars.DataFrame` construit à partir de `to_records()`, destiné aux analyses statistiques à grande échelle
+        parallélisées nativement, conformément à la stratégie de remplacement de Pandas par Polars documentée pour le passage à
+        l'échelle (Document 4 §4). Lève `ImportError` si Polars n'est pas installé. Aucun effet de bord.
+        """
+        import polars as pl
+
+        return pl.DataFrame(self.to_records())
+
     def to_parquet(self, path: str) -> None:
         """
         Exporte l'intégralité du journal au format Parquet.

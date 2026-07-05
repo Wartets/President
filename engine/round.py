@@ -285,6 +285,7 @@ def run_round(
                     state.trick.sequence_min_power,
                     config.straights_enabled,
                     allow_equal,
+                    config=config,
                 )
                 if state.is_equal_forced and valid:
                     resulting = combination_power(action.cards, state.e_rev, action.declared_power)

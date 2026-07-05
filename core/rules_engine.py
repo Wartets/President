@@ -232,6 +232,25 @@ def combination_power(
     return declared_power if declared_power is not None else 0
 
 
+@numba.njit(cache=True)
+def _is_consecutive_run(powers: np.ndarray) -> bool:
+    """
+    Détermine si un tableau de puissances triées forme une suite consécutive.
+
+    Paramètre `powers` : tableau numpy d'entiers 64 bits, puissances résolues d'une combinaison candidate à la suite, triées par ordre
+    croissant, taille quelconque positive ou nulle.
+    Retourne un booléen, vrai si moins de deux éléments sont présents, faux dès que deux valeurs consécutives ne diffèrent pas exactement de
+    un. Complexité linéaire en la taille de `powers`. Aucun effet de bord. Fonction compilée en code machine par Numba, sans dépendance à
+    l'interpréteur Python lors de l'exécution.
+    """
+    if powers.shape[0] < 2:
+        return True
+    for i in range(powers.shape[0] - 1):
+        if powers[i + 1] - powers[i] != 1:
+            return False
+    return True
+
+
 def is_valid_sequence_combination(
     cards: Sequence[Card],
     e_rev: bool,
@@ -271,13 +290,28 @@ def is_valid_sequence_combination(
     if len(set(resolved_powers)) != len(resolved_powers):
         return False
 
-    for i in range(len(resolved_powers) - 1):
-        if resolved_powers[i + 1] - resolved_powers[i] != 1:
-            return False
-    return True
+    powers_array = np.array(resolved_powers, dtype=np.int64)
+    return _is_consecutive_run(powers_array)
 
 
 # Déclencheurs de règles avancées (matrice de compatibilité, Document 1 §7)
+
+def _remapped_magic_rank(config: GameConfig, e_rev: bool) -> str:
+    """
+    Calcule le rang magique effectif après remappage éventuel par la révolution.
+
+    Paramètre `config` : configuration de la partie.
+    Paramètre `e_rev` : état de révolution courant, utilisé pour appliquer la résolution [C] de la matrice de compatibilité.
+    Retourne une chaîne, rang facial magique effectif, égal à `config.effective_magic_card_rank()` si `e_rev` est faux, ou à son
+    symétrique par rapport à la hiérarchie standard si `e_rev` est vrai. Aucun effet de bord.
+    """
+    magic_rank = config.effective_magic_card_rank()
+    magic_index_std = rank_facial_index(magic_rank)
+    if e_rev:
+        mirror_index = len(RANK_ORDER) - 2 - magic_index_std
+        magic_rank = RANK_ORDER[mirror_index]
+    return magic_rank
+
 
 def triggers_magic_closure(
     cards: Sequence[Card],
@@ -302,12 +336,7 @@ def triggers_magic_closure(
     if not config.effective_magic_card_enabled():
         return False
 
-    magic_rank = config.effective_magic_card_rank()
-    magic_index_std = rank_facial_index(magic_rank)
-    if e_rev:
-        # Résolution [C] : remappage vers le symétrique de la hiérarchie.
-        mirror_index = len(RANK_ORDER) - 2 - magic_index_std
-        magic_rank = RANK_ORDER[mirror_index]
+    magic_rank = _remapped_magic_rank(config, e_rev)
 
     for card in cards:
         if card.is_joker():
@@ -317,6 +346,27 @@ def triggers_magic_closure(
         if card.rank.value == magic_rank:
             return True
     return False
+
+
+def is_magic_single_clear(card: Card, config: GameConfig, e_rev: bool) -> bool:
+    """
+    Détermine si une carte unique clôture un pli de taille quelconque par effet de clôture magique.
+
+    Paramètre `card` : carte unique candidate à la clôture.
+    Paramètre `config` : configuration de la partie.
+    Paramètre `e_rev` : état de révolution courant.
+    Retourne un booléen, vrai si une règle de clôture magique est active, si `effective_magic_single_clears_all` est vrai, et si `card`
+    n'est pas un Joker et possède le rang magique effectif remappé selon `e_rev`. Conformément à l'interaction avec la taille de pli $X$
+    documentée en Document 1 §6.2, une telle carte clôture un pli de taille $X \\ge 1$ quelconque indépendamment de la puissance courante
+    du pli. Aucun effet de bord.
+    """
+    if not config.effective_magic_card_enabled():
+        return False
+    if not config.effective_magic_single_clears_all():
+        return False
+    if card.is_joker():
+        return False
+    return card.rank.value == _remapped_magic_rank(config, e_rev)
 
 
 def triggers_revolution(
@@ -523,6 +573,7 @@ def is_action_valid(
     sequence_min_power: Optional[int],
     straights_enabled: bool,
     allow_equal_power: bool = False,
+    config: Optional[GameConfig] = None,
 ) -> bool:
     """
     Valide strictement une combinaison retournée par un agent avant son
@@ -539,9 +590,13 @@ def is_action_valid(
     Paramètre `straights_enabled` : indique si les suites sont autorisées par la configuration.
     Paramètre `allow_equal_power` : autorise une puissance résultante égale à `min_power_exclusive` plutôt que strictement supérieure, conformément à
     `GameConfig.skip_on_equal`.
+    Paramètre `config` : configuration de la partie, optionnelle. Lorsqu'elle est fournie, autorise la clôture magique à carte unique
+    (`is_magic_single_clear`) indépendamment de `required_size`, conformément à l'interaction documentée en Document 1 §6.2. `None`
+    désactive cette vérification.
     Retourne un booléen, vrai si `cards` constitue un sous-ensemble de `hand`, si sa taille correspond à `required_size` lorsque celui-ci est
     fourni, et si `cards` constitue soit une combinaison uniforme valide de puissance strictement supérieure à `min_power_exclusive`, soit, lorsque
-    `straights_enabled` est vrai, une suite valide de puissance minimale strictement supérieure à `sequence_min_power`. Aucun effet de bord.
+    `straights_enabled` est vrai, une suite valide de puissance minimale strictement supérieure à `sequence_min_power`. Retourne également vrai,
+    sans autre vérification, si `cards` est réduite à une unique carte satisfaisant `is_magic_single_clear` selon `config`. Aucun effet de bord.
     """
     if not cards:
         return False
@@ -550,6 +605,9 @@ def is_action_valid(
         if card not in remaining_hand_cards:
             return False
         remaining_hand_cards.remove(card)
+
+    if config is not None and len(cards) == 1 and is_magic_single_clear(cards[0], config, e_rev):
+        return True
 
     if required_size is not None and len(cards) != required_size:
         return False

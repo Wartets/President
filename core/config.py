@@ -120,6 +120,55 @@ class GameConfig:
     no_finish_on_joker: bool = False
     no_finish_on_revolution: bool = False
 
+    def __post_init__(self) -> None:
+        """
+        Valide les contraintes structurelles inter-champs de la configuration.
+
+        Retourne `None`. Lève `ValueError` si l'une des contraintes suivantes n'est pas respectée : `player_count` supérieur ou égal à
+        trois ; `double_revolution_enabled` impliquant `revolution_enabled` ; `double_revolution_enabled` ou `interception_enabled`
+        impliquant un nombre de paquets effectif supérieur ou égal à deux ; `pass_type`, `vp_distribution_type`, `finish_penalty_type` et
+        `strict_remainder_role` appartenant à leur ensemble de valeurs autorisées respectif ; `magic_card_rank` et `skip_turn_rank`
+        appartenant à l'ensemble des rangs faciaux non-Joker. Aucun effet de bord hors la levée d'exception.
+        """
+        valid_ranks = ("3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A", "2")
+
+        if self.player_count < 3:
+            raise ValueError("player_count doit être supérieur ou égal à 3.")
+
+        if self.double_revolution_enabled and not self.revolution_enabled:
+            raise ValueError("double_revolution_enabled requiert revolution_enabled.")
+
+        if not self.deck_scaling_auto and self.forced_deck_count is not None:
+            effective_decks = self.forced_deck_count
+        else:
+            effective_decks = max(1, (self.player_count - 1) // 4 + 1)
+        if (self.double_revolution_enabled or self.interception_enabled) and effective_decks < 2:
+            raise ValueError(
+                "double_revolution_enabled et interception_enabled requièrent un nombre de paquets effectif supérieur ou égal à 2."
+            )
+
+        if self.pass_type not in (PASS_TYPE_HARD_ONLY, PASS_TYPE_ALLOW_SOFT):
+            raise ValueError("pass_type doit être HARD_ONLY ou ALLOW_SOFT.")
+
+        if self.vp_distribution_type not in (
+            VP_DISTRIBUTION_LEGACY_STEPPED, VP_DISTRIBUTION_LINEAR, VP_DISTRIBUTION_SYMMETRICAL,
+        ):
+            raise ValueError("vp_distribution_type doit être LEGACY_STEPPED, LINEAR ou SYMMETRICAL.")
+
+        if self.finish_penalty_type not in (PENALTY_INSTANT_SCUM, PENALTY_DRAW_CARDS):
+            raise ValueError("finish_penalty_type doit être PENALTY_INSTANT_SCUM ou PENALTY_DRAW_CARDS.")
+
+        if self.strict_remainder_role not in (
+            ROLE_PRESIDENT, ROLE_VICE_PRESIDENT, ROLE_NEUTRAL, ROLE_VICE_SCUM, ROLE_SCUM,
+        ):
+            raise ValueError("strict_remainder_role doit être un rôle valide.")
+
+        if self.magic_card_rank not in valid_ranks:
+            raise ValueError("magic_card_rank doit être un rang facial non-Joker.")
+
+        if self.skip_turn_rank not in valid_ranks:
+            raise ValueError("skip_turn_rank doit être un rang facial non-Joker.")
+
     def effective_magic_card_enabled(self) -> bool:
         """
         Indique si une règle de clôture magique quelconque est active.
