@@ -60,6 +60,31 @@ def _has_any_legal_play(hand: Hand, e_rev: bool, config: GameConfig) -> bool:
     return False
 
 
+def _count_legal_plays(state: GameState, pid: int, config: GameConfig) -> int:
+    """
+    Dénombre les combinaisons légales distinctes disponibles pour un joueur à l'instant courant.
+
+    Paramètre `state` : vue matérialisée de l'état courant.
+    Paramètre `pid` : identifiant du joueur considéré.
+    Paramètre `config` : configuration de la partie.
+    Retourne un entier positif ou nul, somme du nombre d'options retournées par `generate_uniform_plays` lorsque le pli actif n'est pas une
+    suite, et par `generate_sequence_plays` lorsque `straights_enabled` est vrai et que le pli est vide ou déjà engagé en suite. Aucun effet
+    de bord.
+    """
+    hand = state.hands[pid]
+    trick = state.trick
+    required_size = trick.size if trick.size > 0 else None
+    min_power_exclusive = trick.current_power
+
+    count = 0
+    if not trick.is_sequence:
+        count += len(generate_uniform_plays(hand, state.e_rev, required_size, min_power_exclusive))
+    if config.straights_enabled and (trick.size == 0 or trick.is_sequence):
+        seq_min = trick.sequence_min_power if trick.is_sequence else None
+        count += len(generate_sequence_plays(hand, state.e_rev, required_size, seq_min))
+    return count
+
+
 def _putsch_condition_met(hand: Hand, e_rev: bool) -> bool:
     """
     Évalue la condition mathématique d'éligibilité au Putsch.
@@ -225,7 +250,12 @@ def run_round(
                     break
                 continue
 
-            emit(EventActionRequest, player_id=pid, trick_index=trick_index)
+            emit(
+                EventActionRequest,
+                player_id=pid,
+                trick_index=trick_index,
+                legal_action_count=_count_legal_plays(state, pid, config),
+            )
             action = agents[pid].choose_action(state)
             was_suboptimal = False
 
@@ -312,7 +342,13 @@ def run_round(
     if remaining:
         last_player = remaining[0]
         state.finish_order.append(last_player)
-        emit(EventPlayerFinished, player_id=last_player, rank=len(state.finish_order) - 1, vp_earned=0.0)
+        last_rank = len(state.finish_order) - 1
+        emit(
+            EventPlayerFinished,
+            player_id=last_player,
+            rank=last_rank,
+            vp_earned=compute_vp(last_rank, n, config.vp_distribution_type),
+        )
 
     vp_by_player: Dict[int, float] = {}
     roles_by_player: Dict[int, str] = {}
@@ -413,14 +449,26 @@ def _apply_play(state: GameState, config: GameConfig, agents, pid: int, action: 
     state.is_equal_forced = bool(
         config.skip_on_equal and previous_power is not None and new_power == previous_power
     )
+    if state.is_equal_forced:
+        emit(EventRuleTriggered, rule_name="EQUAL_FORCED", triggering_player_id=pid)
 
     if triggers_revolution(action.cards, config, is_sequence_play):
         state.e_rev = not state.e_rev
-        emit(EventRuleTriggered, rule_name="REVOLUTION", triggering_player_id=pid)
+        emit(
+            EventRuleTriggered,
+            rule_name="REVOLUTION",
+            triggering_player_id=pid,
+            magnitude=len(action.cards),
+        )
     if triggers_double_revolution(action.cards, config, is_sequence_play):
         state.e_rev = not state.e_rev
         state.l_rev = True
-        emit(EventRuleTriggered, rule_name="DOUBLE_REVOLUTION", triggering_player_id=pid)
+        emit(
+            EventRuleTriggered,
+            rule_name="DOUBLE_REVOLUTION",
+            triggering_player_id=pid,
+            magnitude=len(action.cards),
+        )
 
     if triggers_magic_closure(action.cards, config, state.e_rev, action.declared_power, is_sequence_play):
         state.trick.is_closed = True
@@ -451,7 +499,12 @@ def _apply_play(state: GameState, config: GameConfig, agents, pid: int, action: 
     if not state.trick.is_closed:
         skip_count = triggers_skip_turn(action.cards, config)
         if skip_count > 0:
-            emit(EventRuleTriggered, rule_name="SKIP_TURN", triggering_player_id=pid)
+            emit(
+                EventRuleTriggered,
+                rule_name="SKIP_TURN",
+                triggering_player_id=pid,
+                magnitude=skip_count,
+            )
             skip_target = state.trick.last_player_id
             for _ in range(skip_count):
                 skip_target = _advance_player(state, len(state.hands), skip_target)
@@ -493,6 +546,9 @@ def _finish_player(
     if config.finish_penalty_extended and penalty_condition:
         forced_scum_ref[0] = pid
 
+    if config.finish_penalty_enabled and penalty_condition:
+        emit(EventRuleTriggered, rule_name="FINISH_PENALTY", triggering_player_id=pid)
+
     if config.finish_penalty_enabled and penalty_condition and config.finish_penalty_type == PENALTY_DRAW_CARDS:
         kept = action.cards[: min(config.finish_penalty_draw_count, len(action.cards))]
         state.hands[pid] = state.hands[pid].with_added(kept)
@@ -504,10 +560,12 @@ def _finish_player(
     state.is_finished[pid] = True
     state.is_eligible[pid] = False
     state.finish_order.append(pid)
+    rank = len(state.finish_order) - 1
+    vp_earned = compute_vp(rank, config.player_count, config.vp_distribution_type)
     emit(EventHandEmpty, player_id=pid)
     emit(
         EventPlayerFinished,
         player_id=pid,
-        rank=len(state.finish_order) - 1,
-        vp_earned=0.0,
+        rank=rank,
+        vp_earned=vp_earned,
     )

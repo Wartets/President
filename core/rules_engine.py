@@ -17,9 +17,32 @@ from __future__ import annotations
 import random
 from typing import Dict, List, Optional, Sequence, Tuple
 
+import numba
+import numpy as np
+
 from core.config import GameConfig
 from core.math_utils import f_power, f_std, rank_facial_index
 from core.models import Card, Hand, RANK_ORDER, Rank, Suit
+
+
+@numba.njit(cache=True)
+def _is_uniform_power_array(powers: np.ndarray) -> bool:
+    """
+    Détermine si un tableau de puissances est uniforme.
+
+    Paramètre `powers` : tableau numpy d'entiers 64 bits, puissances des cartes non Joker d'une combinaison candidate, taille quelconque
+    positive ou nulle.
+    Retourne un booléen, faux si `powers` est vide, vrai si toutes les valeurs de `powers` sont égales entre elles. Complexité linéaire en la
+    taille de `powers`. Aucun effet de bord. Fonction compilée en code machine par Numba, sans dépendance à l'interpréteur Python lors de
+    l'exécution.
+    """
+    if powers.shape[0] == 0:
+        return False
+    first = powers[0]
+    for i in range(1, powers.shape[0]):
+        if powers[i] != first:
+            return False
+    return True
 
 
 # Construction et distribution du paquet
@@ -180,11 +203,11 @@ def is_valid_uniform_combination(
         return False
     if not non_jokers:
         return True
-    powers = {f_power(c, e_rev) for c in non_jokers}
-    if len(powers) != 1:
+    powers_array = np.array([f_power(c, e_rev) for c in non_jokers], dtype=np.int64)
+    if not _is_uniform_power_array(powers_array):
         return False
     if has_joker:
-        return declared_power == next(iter(powers))
+        return declared_power == int(powers_array[0])
     return True
 
 

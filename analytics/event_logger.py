@@ -12,7 +12,11 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 from typing import Any, Dict, List, TypeVar
+
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from events.base import Event
 
@@ -51,17 +55,34 @@ class EventLogger:
     Champ `events` : liste ordonnée des événements reçus depuis l'instanciation.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, parquet_buffer_size: int = 100000) -> None:
         self.events: List[Event] = []
+        self.parquet_buffer_size = parquet_buffer_size
+        self._parquet_buffer: List[Dict[str, Any]] = []
 
     def __call__(self, event: Event) -> None:
         """
         Enregistre un événement reçu du bus.
 
         Paramètre `event` : événement reçu, type `Event`.
-        Retourne `None`. Effet de bord : ajoute `event` à `events`.
+        Retourne `None`. Effet de bord : ajoute `event` à `events` et au tampon interne de segmentation Parquet, borné par
+        `parquet_buffer_size`.
         """
         self.events.append(event)
+        self._parquet_buffer.append(self._to_record(event))
+
+    def _to_record(self, event: Event) -> Dict[str, Any]:
+        """
+        Convertit un unique événement en dictionnaire plat sérialisable.
+
+        Paramètre `event` : événement à convertir, type `Event`.
+        Retourne un dictionnaire portant un champ `event_type` égal au nom de la classe de l'événement, ainsi que l'ensemble des champs de
+        l'événement convertis en valeurs sérialisables. Aucun effet de bord.
+        """
+        record = {"event_type": type(event).__name__}
+        for field in dataclasses.fields(event):
+            record[field.name] = _serialize_value(getattr(event, field.name))
+        return record
 
     def to_records(self) -> List[Dict[str, Any]]:
         """
@@ -70,13 +91,7 @@ class EventLogger:
         Retourne une liste de dictionnaires, chacun portant un champ `event_type` égal au nom de la classe de l'événement, ainsi que
         l'ensemble des champs de l'événement convertis en valeurs sérialisables. Aucun effet de bord.
         """
-        records: List[Dict[str, Any]] = []
-        for event in self.events:
-            record = {"event_type": type(event).__name__}
-            for field in dataclasses.fields(event):
-                record[field.name] = _serialize_value(getattr(event, field.name))
-            records.append(record)
-        return records
+        return [self._to_record(event) for event in self.events]
 
     def to_jsonl(self, path: str) -> None:
         """
@@ -101,6 +116,35 @@ class EventLogger:
         import pandas as pd
 
         return pd.DataFrame(self.to_records())
+
+    def to_parquet(self, path: str) -> None:
+        """
+        Exporte l'intégralité du journal au format Parquet.
+
+        Paramètre `path` : chemin du fichier de destination.
+        Retourne `None`. Effet de bord : construit une unique table Arrow colonnaire à partir de `to_records()` et l'écrit dans le fichier
+        désigné par `path`, écrasant tout contenu existant.
+        """
+        table = pa.Table.from_pylist(self.to_records())
+        pq.write_table(table, path)
+
+    def flush_to_parquet(self, path: str) -> None:
+        """
+        Vide le tampon d'événements accumulés depuis le dernier appel vers un fichier Parquet.
+
+        Paramètre `path` : chemin du fichier de destination.
+        Retourne `None`. Effet de bord : convertit le tampon interne en table Arrow, la fusionne avec le contenu existant de `path` s'il
+        existe, réécrit le fichier, puis vide le tampon interne. N'a aucun effet si le tampon est vide. Destiné à un appel périodique par
+        segments de `parquet_buffer_size` événements lors de simulations massives, conformément à la stratégie de Buffered Writing.
+        """
+        if not self._parquet_buffer:
+            return
+        table = pa.Table.from_pylist(self._parquet_buffer)
+        if os.path.exists(path):
+            existing = pq.read_table(path)
+            table = pa.concat_tables([existing, table])
+        pq.write_table(table, path)
+        self._parquet_buffer.clear()
 
     def events_of_type(self, event_type: type[TEvent]) -> List[TEvent]:
         """

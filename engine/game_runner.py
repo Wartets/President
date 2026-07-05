@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
+import numpy as np
+
 from agents.interface import AbstractBaseAgent
 from core.config import GameConfig
 from engine.event_bus import EventBus
@@ -92,3 +94,21 @@ class Game:
         effets de bord que `play_round`, répétés `count` fois.
         """
         return [self.play_round() for _ in range(count)]
+
+    def play_rounds_vectorized(self, count: int) -> np.ndarray:
+        """
+        Exécute plusieurs manches consécutives et restitue les points de victoire sous forme de tenseur.
+
+        Paramètre `count` : nombre de manches à exécuter, entier positif.
+        Retourne un tableau `numpy.ndarray` de type `float64` et de forme `(count, player_count)`, où l'élément d'indice `[i, pid]` est le
+        point de victoire attribué au joueur `pid` à l'issue de la manche d'index `i`. Destiné aux pipelines d'entraînement consommant des
+        tenseurs plutôt que des dictionnaires Python, conformément à la séparation Fast-Path / Slow-Path. Mêmes effets de bord que
+        `play_round`, répétés `count` fois.
+        """
+        n = self.config.player_count
+        vp_tensor = np.zeros((count, n), dtype=np.float64)
+        for i in range(count):
+            vp_by_player = self.play_round()
+            for pid, vp in vp_by_player.items():
+                vp_tensor[i, pid] = vp
+        return vp_tensor

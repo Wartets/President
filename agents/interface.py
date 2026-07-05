@@ -80,3 +80,14 @@ class AbstractBaseAgent(ABC):
         vrai, ou `None` sinon.
         """
         raise NotImplementedError
+
+    def get_batch_action(self, game_states: List[GameState]) -> List[Action]:
+        """
+        Sollicite le choix d'une action de tour pour un lot d'états simultanés.
+
+        Paramètre `game_states` : liste de vues matérialisées de l'état courant, une par simulation parallèle, taille $B$.
+        Retourne une liste de `Action` de taille $B$, dans le même ordre que `game_states`. Implémentation par défaut : applique
+        `choose_action` séquentiellement à chaque état ; toute implémentation supportant l'inférence par batch sur GPU doit substituer cette
+        méthode par un appel unique groupé. Aucune contrainte de pureté n'est imposée à l'implémentation.
+        """
+        return [self.choose_action(state) for state in game_states]

@@ -80,10 +80,13 @@ class EventActionRequest(Event):
 
     Champ `player_id` : identifiant du joueur sollicité.
     Champ `trick_index` : index du pli courant au sein de la manche.
+    Champ `legal_action_count` : nombre de combinaisons légales distinctes disponibles pour le joueur sollicité au moment de la
+    sollicitation, toutes formes de combinaison confondues (uniforme et suite lorsque applicable).
     """
 
     player_id: int = -1
     trick_index: int = 0
+    legal_action_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -139,7 +142,11 @@ class EventRuleTriggered(Event):
     Champ `rule_name` : nom de la règle déclenchée, parmi `REVOLUTION`, `DOUBLE_REVOLUTION`, `MAGIC_CLOSURE`, `SKIP_TURN`, `INTERCEPTION`,
     `EQUAL_FORCED`, `FINISH_PENALTY`.
     Champ `triggering_player_id` : identifiant du joueur ayant déclenché la règle.
+    Champ `magnitude` : grandeur numérique optionnelle associée à la règle lorsque celle-ci en porte une, égale à la taille de la
+    combinaison pour `REVOLUTION` et `DOUBLE_REVOLUTION`, au nombre de joueurs sautés pour `SKIP_TURN`, `None` pour les règles sans grandeur
+    associée.
     """
 
     rule_name: str = ""
     triggering_player_id: int = -1
+    magnitude: Optional[int] = None
