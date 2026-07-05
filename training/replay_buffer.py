@@ -84,6 +84,18 @@ class RedisReplayBuffer:
         """
         return int(self.client.llen(self.key))
 
+    def ping(self) -> bool:
+        """
+        Vérifie l'accessibilité de l'instance Redis cible.
+
+        Retourne un booléen, vrai si l'instance Redis répond à une commande `PING`, faux si la connexion échoue pour quelque raison que ce
+        soit (serveur non démarré, hôte ou port incorrect, réseau indisponible). Aucun effet de bord hors la tentative de connexion réseau.
+        """
+        try:
+            return bool(self.client.ping())
+        except Exception:
+            return False
+
     def sample(self, batch_size: int) -> Optional[List[Dict[str, Any]]]:
         """
         Échantillonne un lot de transitions uniformément parmi le tampon courant.

@@ -18,6 +18,7 @@ from typing import Any, cast
 import ray
 
 from core.config import GameConfig
+from training.replay_buffer import RedisReplayBuffer
 from training.rollout_worker import RolloutWorker
 from training.trainer import Trainer
 
@@ -45,6 +46,14 @@ def launch(
     Retourne `None`. Effet de bord : initialise un cluster Ray local, démarre le Trainer dans un thread dédié, boucle indéfiniment sur les
     acteurs de rollout jusqu'à l'achèvement du Trainer, puis arrête le cluster Ray.
     """
+    probe = RedisReplayBuffer(host=redis_host, port=redis_port)
+    if not probe.ping():
+        raise RuntimeError(
+            f"Impossible de joindre une instance Redis à l'adresse {redis_host}:{redis_port}. "
+            "Démarrer un serveur Redis local et vérifier les paramètres --redis-host/--redis-port avant de relancer "
+            "l'entraînement distribué."
+        )
+
     ray.init(num_cpus=num_workers, ignore_reinit_error=True, log_to_driver=False)
     config = GameConfig(player_count=player_count)
 
