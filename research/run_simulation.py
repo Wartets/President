@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import os
 import time
-from typing import Dict, List, Type
+from typing import Any, Dict, List, Type
 
 import ray
 from rich.console import Console
