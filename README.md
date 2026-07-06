@@ -37,6 +37,10 @@ Le Président est un jeu de défausse à hiérarchie inversée cyclique : $N \ge
 * Moteur vectorisé `numpy` traitant un lot de manches en lock-step, pour l'entraînement à très haut débit sur le sous-ensemble de règles compatible avec la vectorisation.
 * Entraînement REINFORCE mono-processus à politique linéaire.
 * Chaîne d'entraînement distribué complète (Rollout Workers Ray producteurs de transitions, tampon de rejeu Redis partagé, Trainer consommateur appliquant les mises à jour de gradient sous précision mixte GPU lorsque disponible), avec synchronisation asynchrone des poids via Redis.
+* Évaluation comparative directe de profils hétérogènes, y compris de modèles entraînés chargés par poids, sur taux de victoire et VP cumulé (`research.evaluate_agent`).
+* Recherche combinatoire sur le produit cartésien de profils, de nombres de joueurs, de présets de règles et de tailles de partie (`research.run_combinatory`).
+* Génération non interactive de l'ensemble des graphiques d'analyse en une seule commande (`research.generate_graphs`).
+* Pipeline automatique complet de bout en bout (entraînement, évaluation, graphiques, rapport de synthèse), sans intervention humaine, reprenant automatiquement où il s'était arrêté après toute interruption (`research.run_pipeline`).
 
 ## 3. Structure du dépôt
 
@@ -93,8 +97,12 @@ President/
 │   ├── trainer.py               # Processus consommateur, mise à jour de politique torch
 │   └── launch_distributed.py    # Point d'entrée conjoint Rollout Workers + Trainer
 │
-└── research/
-    └── run_simulation.py        # Lanceur de simulations massives parallélisées Ray
+└── research/                # Outils de recherche et d'analyse
+    ├── run_simulation.py        # Lanceur de simulations massives parallélisées Ray
+    ├── run_combinatory.py       # Recherche combinatoire multi-configurations
+    ├── evaluate_agent.py        # Évaluation comparative directe d'agents et de modèles entraînés
+    ├── generate_graphs.py       # Génération non interactive de l'ensemble des graphiques d'analyse
+    └── run_pipeline.py          # Pipeline automatique complet, reprenable après interruption
 ```
 
 ## 4. Installation
@@ -126,7 +134,21 @@ Lancer mille parties simulées avec journalisation complète :
 
 ```bash
 python -m research.run_simulation --games 1000 --player-count 4 --rounds-per-game 10 \
-  --agent-profile rule_based --workers 4 --output research_output.parquet --seed 0
+  --agent-profile rule_based_bot --workers 4 --output research_output.parquet --seed 0
+```
+
+Lister les profils de siège et les présets de règles disponibles, sans lancer de campagne :
+
+```bash
+python -m research.run_simulation --list-profiles
+python -m research.run_simulation --list-presets
+```
+
+Exécuter l'intégralité du cycle de recherche (entraînement, évaluation, graphiques, rapport) en une seule commande, sans intervention
+humaine, avec reprise automatique après interruption :
+
+```bash
+python -m research.run_pipeline --player-count 4
 ```
 
 L'ensemble de ces commandes, leurs options et leur exploitation détaillée sont couvertes exhaustivement dans `documentation/usage.md`.
@@ -136,10 +158,11 @@ L'ensemble de ces commandes, leurs options et leur exploitation détaillée sont
 | Document | Contenu |
 | :--- | :--- |
 | `documentation/rules.md` | Spécification mathématique et formelle intégrale des règles du jeu : définitions, algorithme de manche, matrice de compatibilité croisée entre règles avancées. Référence normative de tout comportement implémenté. |
-| `documentation/usage.md` | Guide d'utilisation opérationnel : installation détaillée, toutes les commandes de `play_game.py` avec exemples pour chaque règle, exploitation des événements et des métriques, simulations de masse, entraînement (mono-processus et distribué), installation et administration de Redis, écriture d'un agent, dépannage. |
+| `documentation/usage.md` | Guide d'utilisation opérationnel : installation détaillée, toutes les commandes de `play_game.py` avec exemples pour chaque règle, exploitation des événements et des métriques, simulations de masse, entraînement (mono-processus et distribué), installation et administration de Redis, écriture d'un agent, génération non interactive des graphiques, pipeline automatique complet, dépannage. |
 | `documentation/architecture.md` | Document de conception interne : principes de conception retenus, rationale de chaque choix technique, structure des données, machines à états, diagrammes de séquence, invariants garantis, limites connues et points d'extension. |
+| `documentation/expected_results.md` | Modèle scientifique des résultats statistiquement attendus pour chaque graphique produit par `research.generate_graphs`, destiné à servir de base à des tests de validation de l'implémentation plutôt qu'à une simple inspection visuelle. |
 
-Ce README couvre la présentation générale et l'entrée en matière ; il ne répète ni les commandes détaillées de `usage.md` ni les justifications de conception d'`architecture.md`.
+Ce README couvre la présentation générale et l'entrée en matière ; il ne répète ni les commandes détaillées de `usage.md`, ni les justifications de conception d'`architecture.md`, ni le modèle statistique d'`expected_results.md`.
 
 ## 7. Panorama des composants principaux
 
@@ -162,9 +185,11 @@ Toute partie est intégralement reproductible à graine (`random_seed`) et confi
 
 ## 10. Étendre le projet
 
-* **Ajouter un agent** : hériter de `agents.interface.AbstractBaseAgent` et implémenter ses quatre méthodes abstraites (`choose_action`, `choose_exchange_cards`, `ask_putsch`, `on_interception_opportunity`). Voir la section 14 de `documentation/usage.md` pour un exemple complet, et l'enregistrer dans le registre de sièges (`_AGENT_REGISTRY`) du point d'entrée concerné (`play_game.py` et/ou `research/run_simulation.py`, ces deux registres n'étant pas mutualisés).
+* **Ajouter un agent** : hériter de `agents.interface.AbstractBaseAgent` et implémenter ses quatre méthodes abstraites (`choose_action`, `choose_exchange_cards`, `ask_putsch`, `on_interception_opportunity`). Voir la section 14 de `documentation/usage.md` pour un exemple complet, et l'enregistrer dans le registre de sièges (`_AGENT_REGISTRY`) du point d'entrée concerné (`play_game.py` et/ou `research/run_simulation.py`, ces deux registres n'étant pas mutualisés). Nommer le module Python de l'agent exactement comme la clé de profil utilisée dans ces registres, afin que retrouver l'implémentation d'un profil reste immédiat.
 * **Ajouter une règle avancée** : introduire le ou les champs correspondants dans `core.config.GameConfig` (avec validation dans `__post_init__` si une contrainte croisée s'impose), implémenter la logique de légalité/déclenchement dans `core.rules_engine`, puis l'intégrer dans `engine.round.run_round` au point du cycle de manche concerné. Documenter la règle dans `documentation/rules.md` selon le même formalisme que les règles existantes.
 * **Ajouter une métrique d'analyse** : toute fonction pure prenant un `analytics.event_logger.EventLogger` (ou une structure dérivée de ses événements) en entrée et retournant une valeur ou une structure numérique s'intègre directement dans `analytics.metrics_calc`, suivant le même schéma que les métriques existantes.
+* **Ajouter un graphique d'analyse** : toute fonction prenant un ou plusieurs `pandas.DataFrame` chargés depuis `data/`/`weights/` en entrée et écrivant une figure dans `figures/` s'intègre directement dans `research.generate_graphs`, en suivant le même schéma de garde d'absence de données que les fonctions existantes ; documenter le résultat statistique attendu dans `documentation/expected_results.md`.
+* **Étendre le pipeline automatique** : toute étape supplémentaire (entraînement, simulation, analyse) s'intègre dans `research.run_pipeline` via un appel à `_run_step` avec un identifiant d'étape unique, garantissant automatiquement l'idempotence et la reprise après interruption.
 
 ## 11. Limites connues
 
