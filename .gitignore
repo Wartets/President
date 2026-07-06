@@ -180,6 +180,5 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 .vscode
-documentation
 *.npy
 *.parquet
