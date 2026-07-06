@@ -21,6 +21,7 @@ import torch
 from rich.console import Console
 from rich.table import Table
 
+import naming
 from agents.torch_rl_agent import PolicyNet, resolve_device
 from training.replay_buffer import RedisReplayBuffer
 
@@ -48,10 +49,23 @@ class Trainer:
         redis_port: int = 6379,
         learning_rate: float = 1e-3,
         device: Optional[str] = None,
+        resume_weights: Optional[str] = None,
+        player_count: int = 4,
+        model_name: str = "torch_rl_weights",
     ) -> None:
         self.buffer = RedisReplayBuffer(host=redis_host, port=redis_port)
         self.device = resolve_device(device)
         self.policy = PolicyNet().to(self.device)
+        self.learning_rate = learning_rate
+        self.player_count = player_count
+        self.model_name = model_name
+        self.steps_already_trained = 0
+        if resume_weights is not None:
+            state_dict = torch.load(resume_weights, map_location=self.device)
+            self.policy.load_state_dict(state_dict)
+            metadata = naming.read_weights_metadata(resume_weights)
+            if metadata is not None:
+                self.steps_already_trained = int(metadata.get("rounds_trained", 0))
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=learning_rate)
         self.use_amp = self.device.type == "cuda"
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
@@ -100,14 +114,44 @@ class Trainer:
         self.scaler.update()
         return float(loss.item())
 
+    def _save_checkpoint(self, steps_completed: int) -> str:
+        """
+        Sauvegarde un instantané local des poids de politique sur disque.
+
+        Paramètre `steps_completed` : nombre total d'étapes de gradient exécutées, incluant celles d'une éventuelle reprise antérieure.
+        Retourne le chemin du fichier de poids écrit. Effet de bord : écrit un fichier `torch` de poids et un fichier de métadonnées JSON
+        associé dans le répertoire `weights/`.
+        """
+        weights_path = naming.build_weights_filename(
+            model_name=self.model_name,
+            player_count=self.player_count,
+            learning_rate=self.learning_rate,
+            rounds=steps_completed,
+            extension="pt",
+        )
+        torch.save(self.policy.state_dict(), weights_path)
+        naming.write_weights_metadata(
+            weights_path,
+            {
+                "model_name": self.model_name,
+                "player_count": self.player_count,
+                "learning_rate": self.learning_rate,
+                "rounds_trained": steps_completed,
+                "device": str(self.device),
+            },
+        )
+        return weights_path
+
     def run(self, batch_size: int, total_steps: int) -> None:
         """
         Exécute la boucle d'apprentissage complète.
 
         Paramètre `batch_size` : taille de lot utilisée à chaque étape de gradient.
-        Paramètre `total_steps` : nombre total d'étapes d'apprentissage à exécuter.
-        Retourne `None`. Effet de bord : attend que le tampon soit suffisamment peuplé, exécute `total_steps` appels à `train_step`,
-        republie les poids toutes les `_PUBLISH_INTERVAL` étapes, et affiche un tableau de bord `rich` de progression.
+        Paramètre `total_steps` : nombre total d'étapes d'apprentissage à exécuter lors de cet appel, en sus des étapes déjà effectuées lors
+        d'une éventuelle reprise.
+        Retourne `None`. Effet de bord : attend que le tampon soit suffisamment peuplé, exécute `total_steps` appels à `train_step`, republie
+        les poids toutes les `_PUBLISH_INTERVAL` étapes, sauvegarde un instantané local nommé dans `weights/`, et affiche un tableau de
+        bord `rich` de progression.
         """
         console = Console()
         while self.buffer.size() < batch_size:
@@ -115,17 +159,22 @@ class Trainer:
 
         for step in range(total_steps):
             loss = self.train_step(batch_size)
-            if (step + 1) % _PUBLISH_INTERVAL == 0:
+            steps_completed = self.steps_already_trained + step + 1
+            if steps_completed % _PUBLISH_INTERVAL == 0:
                 self._publish_weights()
-                table = Table(title=f"Entraînement distribué, étape {step + 1}/{total_steps}")
+                checkpoint_path = self._save_checkpoint(steps_completed)
+                table = Table(title=f"Entraînement distribué, étape {steps_completed}")
                 table.add_column("Métrique")
                 table.add_column("Valeur")
                 table.add_row("Perte courante", f"{loss:.5f}" if loss is not None else "indisponible")
                 table.add_row("Taille du tampon", str(self.buffer.size()))
                 table.add_row("Périphérique", str(self.device))
+                table.add_row("Instantané local", checkpoint_path)
                 console.print(table)
 
         self._publish_weights()
+        final_path = self._save_checkpoint(self.steps_already_trained + total_steps)
+        print(f"Poids finaux sauvegardés dans {final_path}")
 
 
 def main() -> None:
@@ -141,6 +190,9 @@ def main() -> None:
     parser.add_argument("--total-steps", type=int, default=10000)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--resume-weights", type=str, default=None)
+    parser.add_argument("--player-count", type=int, default=4)
+    parser.add_argument("--model-name", type=str, default="torch_rl_weights")
     args = parser.parse_args()
 
     trainer = Trainer(
@@ -148,6 +200,9 @@ def main() -> None:
         redis_port=args.redis_port,
         learning_rate=args.learning_rate,
         device=args.device,
+        resume_weights=args.resume_weights,
+        player_count=args.player_count,
+        model_name=args.model_name,
     )
     trainer.run(args.batch_size, args.total_steps)
 

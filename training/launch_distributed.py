@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import os
 import threading
-from typing import Any, cast
+from typing import Any, Optional, cast
 
 import ray
 
@@ -32,6 +32,8 @@ def launch(
     redis_port: int,
     batch_size: int,
     total_steps: int,
+    resume_weights: Optional[str] = None,
+    model_name: str = "torch_rl_weights",
 ) -> None:
     """
     Démarre les Rollout Workers et le Trainer, puis attend l'achèvement de l'entraînement.
@@ -57,7 +59,13 @@ def launch(
     ray.init(num_cpus=num_workers, ignore_reinit_error=True, log_to_driver=False)
     config = GameConfig(player_count=player_count)
 
-    trainer = Trainer(redis_host=redis_host, redis_port=redis_port)
+    trainer = Trainer(
+        redis_host=redis_host,
+        redis_port=redis_port,
+        resume_weights=resume_weights,
+        player_count=player_count,
+        model_name=model_name,
+    )
     trainer_thread = threading.Thread(target=trainer.run, args=(batch_size, total_steps), daemon=True)
     trainer_thread.start()
 
@@ -88,11 +96,14 @@ def main() -> None:
     parser.add_argument("--redis-port", type=int, default=6379)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--total-steps", type=int, default=10000)
+    parser.add_argument("--resume-weights", type=str, default=None)
+    parser.add_argument("--model-name", type=str, default="torch_rl_weights")
     args = parser.parse_args()
 
     launch(
         args.workers, args.rounds_per_batch, args.opponent_pool, args.player_count,
         args.redis_host, args.redis_port, args.batch_size, args.total_steps,
+        resume_weights=args.resume_weights, model_name=args.model_name,
     )
 
 

@@ -9,3 +9,7 @@ pynvml
 tqdm
 numba
 redis[hiredis]
+matplotlib
+plotly
+bokeh
+seaborn

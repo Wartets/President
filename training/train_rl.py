@@ -13,13 +13,14 @@ from __future__ import annotations
 
 import argparse
 import copy
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from rich.console import Console
 from rich.table import Table
 from tqdm import tqdm
 
+import naming
 from agents.greedy_bot import GreedyBot
 from agents.rl_agent import FEATURE_DIM, RLAgent, _option_features
 from agents.rule_based_bot import RuleBasedBot
@@ -70,13 +71,12 @@ def _run_training_round(
     Paramètre `config` : configuration de la partie.
     Paramètre `trainee` : instance de `RLAgent` dont la politique est entraînée.
     Paramètre `opponents` : association entre identifiant de joueur et agent adverse fixe pour cette manche.
-    Paramètre `tracker` : liste mutée en place, recevant un tuple `(feature_vector, chosen_score)` par décision `ACTION_PLAY` du joueur
-    entraîné.
+    Paramètre `tracker` : liste mutée en place, recevant un tuple `(feature_vector, chosen_score)` par décision `ACTION_PLAY` du joueur entraîné.
     Paramètre `round_index` : index de la manche à exécuter.
     Paramètre `previous_roles` : rôles issus de la manche précédente, ou `None`.
     Paramètre `game_id` : identifiant de la partie hôte de la manche.
-    Retourne le point de victoire obtenu par `trainee` sur cette manche. Effet de bord : peuple `tracker`, publie les événements de la
-    manche sur un `EventBus` local jetable.
+    Retourne le point de victoire obtenu par `trainee` sur cette manche. Effet de bord : peuple `tracker`, publie les événements de la manche sur
+    un `EventBus` local jetable.
     """
     from engine.round import run_round
 
@@ -115,19 +115,24 @@ def train(
     total_rounds: int,
     learning_rate: float = _DEFAULT_LEARNING_RATE,
     opponent_pool: str = "mixed",
-) -> RLAgent:
+    initial_weights: Optional[np.ndarray] = None,
+    initial_epsilon: float = 0.3,
+) -> Tuple[RLAgent, List[float]]:
     """
     Entraîne un `RLAgent` par ajustement de gradient de politique sur un nombre fixé de manches.
 
     Paramètre `config` : configuration de la partie utilisée pour toutes les manches d'entraînement.
-    Paramètre `total_rounds` : nombre total de manches d'entraînement, entier strictement positif.
+    Paramètre `total_rounds` : nombre total de manches d'entraînement exécutées lors de cet appel, entier strictement positif.
     Paramètre `learning_rate` : taux d'apprentissage du gradient de politique, nombre strictement positif.
     Paramètre `opponent_pool` : nature des adversaires simulés, chaîne parmi `'greedy'`, `'rule_based'`, `'mixed'`.
-    Retourne l'instance de `RLAgent` entraînée, portant les poids ajustés. Effet de bord : affiche un tableau de bord `rich` de progression
-    et met à jour `trainee.weights` et `trainee.epsilon` à chaque manche.
+    Paramètre `initial_weights` : poids de politique de départ, utilisés pour reprendre un entraînement antérieur ; poids nuls si `None`.
+    Paramètre `initial_epsilon` : taux d'exploration de départ.
+    Retourne un tuple `(trainee, running_vp)` : l'instance de `RLAgent` entraînée portant les poids ajustés, et la liste des points de victoire
+    obtenus manche après manche. Effet de bord : affiche un tableau de bord `rich` de progression et met à jour `trainee.weights`/`trainee.epsilon`
+    à chaque manche.
     """
     console = Console()
-    trainee = RLAgent(player_id=0, config=config, epsilon=0.3)
+    trainee = RLAgent(player_id=0, config=config, weights=initial_weights, epsilon=initial_epsilon)
 
     opponent_classes = {
         "greedy": [GreedyBot] * (config.player_count - 1),
@@ -169,15 +174,16 @@ def train(
             table.add_row("Poids de politique", np.array2string(trainee.weights, precision=4))
             console.print(table)
 
-    return trainee
+    return trainee, running_vp
 
 
 def main() -> None:
     """
     Point d'entrée en ligne de commande de l'entraînement du `RLAgent`.
 
-    Retourne `None`. Effet de bord : lit les arguments de la ligne de commande, exécute `train`, puis sauvegarde les poids finaux au
-    format `numpy` sur le chemin indiqué.
+    Retourne `None`. Effet de bord : lit les arguments de la ligne de commande, exécute `train` (en reprenant un entraînement antérieur
+    si `--resume` est fourni), puis sauvegarde les poids finaux et leur historique d'entraînement, nommés selon la convention du projet,
+    dans le répertoire `weights/`.
     """
     parser = argparse.ArgumentParser(description="Entraînement REINFORCE de agents.rl_agent.RLAgent")
     parser.add_argument("--rounds", type=int, default=5000)
@@ -185,13 +191,57 @@ def main() -> None:
     parser.add_argument("--learning-rate", type=float, default=_DEFAULT_LEARNING_RATE)
     parser.add_argument("--opponent-pool", choices=["greedy", "rule_based", "mixed"], default="mixed")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--output", type=str, default="rl_weights.npy")
+    parser.add_argument("--model-name", type=str, default="rl_weights")
+    parser.add_argument("--output", type=str, default=None)
+    parser.add_argument("--resume", type=str, default=None)
     args = parser.parse_args()
 
     config = GameConfig(random_seed=args.seed, player_count=args.player_count)
-    trainee = train(config, args.rounds, args.learning_rate, args.opponent_pool)
-    np.save(args.output, trainee.weights)
-    print(f"Poids sauvegardés dans {args.output}")
+
+    initial_weights: Optional[np.ndarray] = None
+    rounds_already_trained = 0
+    if args.resume is not None:
+        initial_weights = np.load(args.resume)
+        metadata = naming.read_weights_metadata(args.resume)
+        if metadata is not None:
+            rounds_already_trained = int(metadata.get("rounds_trained", 0))
+        print(f"Reprise de l'entraînement depuis {args.resume} ({rounds_already_trained} manches déjà jouées).")
+
+    trainee, running_vp = train(
+        config, args.rounds, args.learning_rate, args.opponent_pool,
+        initial_weights=initial_weights,
+    )
+
+    total_rounds_trained = rounds_already_trained + args.rounds
+
+    output_path = args.output or naming.build_weights_filename(
+        model_name=args.model_name,
+        player_count=args.player_count,
+        learning_rate=args.learning_rate,
+        rounds=total_rounds_trained,
+    )
+    np.save(output_path, trainee.weights)
+    naming.write_weights_metadata(
+        output_path,
+        {
+            "model_name": args.model_name,
+            "player_count": args.player_count,
+            "learning_rate": args.learning_rate,
+            "rounds_trained": total_rounds_trained,
+            "opponent_pool": args.opponent_pool,
+            "seed": args.seed,
+            "resumed_from": args.resume,
+        },
+    )
+
+    history_path = naming.build_weights_metadata_filename(output_path).replace(".meta.json", ".history.csv")
+    with open(history_path, "w", encoding="utf-8") as handle:
+        handle.write("round_index,vp\n")
+        for index, vp in enumerate(running_vp):
+            handle.write(f"{rounds_already_trained + index},{vp}\n")
+
+    print(f"Poids sauvegardés dans {output_path}")
+    print(f"Historique d'entraînement sauvegardé dans {history_path}")
 
 
 if __name__ == "__main__":
