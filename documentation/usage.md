@@ -4,24 +4,24 @@ Ce document décrit intégralement le fonctionnement du projet : installation, p
 
 ## Table des matières
 
-1. Présentation générale du projet
-2. Installation
-3. Architecture du projet
-4. Jouer une partie en console (`play_game.py`)
-5. Configurer les règles de la partie (`GameConfig`)
-6. Écrire un script Python autour du moteur (`engine.game_runner.Game`)
-7. Le système d'événements (`events`, `engine.event_bus`)
-8. Journalisation et exploitation des résultats (`analytics.event_logger`, `analytics.metrics_calc`)
-9. Simulations de masse parallélisées (`research.run_simulation`)
-10. Le moteur vectorisé (`training.fast_path.FastPathEngine`)
-11. Entraînement d'un agent à politique linéaire (`training.train_rl`)
-12. Entraînement distribué d'une politique neuronale (Ray + Redis)
-13. Installer et exploiter Redis en détail
-14. Écrire son propre agent
-15. Suivi en temps réel d'une campagne (`analytics.live_monitor`)
-16. Dépannage
-17. Génération non interactive des graphiques (`research.generate_graphs`)
-18. Pipeline automatique complet de bout en bout (`research.run_pipeline`)
+1. [Présentation générale du projet](#1-présentation-générale-du-projet)
+2. [Installation](#2-installation)
+3. [Architecture du projet](#3-architecture-du-projet)
+4. [Jouer une partie en console (`play_game.py`)](#4-jouer-une-partie-en-console-play_gamepy)
+5. [Configurer les règles de la partie (`GameConfig`)](#5-configurer-les-règles-de-la-partie-gameconfig)
+6. [Écrire un script Python autour du moteur (`engine.game_runner.Game`)](#6-écrire-un-script-python-autour-du-moteur-enginegamerunnergame)
+7. [Le système d'événements (`events`, `engine.event_bus`)](#7-le-système-d'événements-events-engineevent_bus)
+8. [Journalisation et exploitation des résultats (`analytics.event_logger`, `analytics.metrics_calc`)](#8-journalisation-et-exploitation-des-résultats-analyticsevent_logger-analyticsmetrics_calc)
+9. [Simulations de masse parallélisées (`research.run_simulation`)](#9-simulations-de-masse-parallélisées-researchrun_simulation)
+10. [Le moteur vectorisé (`training.fast_path.FastPathEngine`)](#10-le-moteur-vectorisé-trainingfast_pathFastPathEngine)
+11. [Entraînement d'un agent à politique linéaire (`training.train_rl`)](#11-entrainement-dun-agent-à-politique-linéaire-trainingtrain_rl)
+12. [Entraînement distribué d'une politique neuronale (Ray + Redis)](#12-entrainement-distribué-dune-politique-neuronale-ray--redis)
+13. [Installer et exploiter Redis en détail](#13-installer-et-exploiter-redis-en-détail)
+14. [Écrire son propre agent](#14-écrire-son-propre-agent)
+15. [Suivi en temps réel d'une campagne (`analytics.live_monitor`)](#15-suivi-en-temps-réel-dune-campagne-analyticslive_monitor)
+16. [Dépannage](#16-dépannage)
+17. [Génération non interactive des graphiques (`research.generate_graphs`)](#17-génération-non-interactive-des-graphiques-researchgenerate_graphs)
+18. [Pipeline automatique complet de bout en bout (`research.run_pipeline`)](#18-pipeline-automatique-complet-de-bout-en-bout-researchrun_pipeline)
 
 ## 1. Présentation générale du projet
 
@@ -35,7 +35,7 @@ Le projet implémente une version paramétrable du jeu de cartes Président, ave
 * une couche d'analyse (`analytics.event_logger.EventLogger`, `analytics.metrics_calc`) transformant le flux d'événements en métriques exploitables (Gini, entropie, taux de passe sous-optimal, matrice de transition de rôles, etc.) ;
 * une chaîne d'entraînement distribué complète (`training.rollout_worker.RolloutWorker`, `training.replay_buffer.RedisReplayBuffer`, `training.trainer.Trainer`, `training.launch_distributed`), reposant sur `ray` pour la parallélisation et `redis` comme tampon de rejeu partagé.
 
-L'intégralité des règles avancées (Révolution, Double Révolution, Suites, Jokers, clôture magique généralisée, Saut de Tour, Interception, Putsch, Taxe Aveugle, pénalités de sortie étendues) est paramétrable via `core.config.GameConfig` et documentée précisément dans `rules.md`. Ce guide se concentre sur l'utilisation opérationnelle du code ; se reporter à `rules.md` pour la spécification mathématique complète de chaque règle.
+L'intégralité des règles avancées (Révolution, Double Révolution, Suites, Jokers, clôture magique généralisée, Saut de Tour, Interception, Putsch, Taxe Aveugle, pénalités de sortie étendues) est paramétrable via `core.config.GameConfig` et documentée précisément dans [`rules.md`](rules.md). Ce guide se concentre sur l'utilisation opérationnelle du code ; se reporter à [`rules.md`](rules.md) pour la spécification mathématique complète de chaque règle.
 
 ## 2. Installation
 
@@ -173,18 +173,18 @@ Toutes les options de `GameConfig` sont exposées en ligne de commande sur `play
 | :--- | :--- | :--- |
 | `--seed N` | `random_seed` | Graine de reproductibilité, réutilisée pour toute la distribution et tout tirage aléatoire de la partie. |
 | `--player-count N` | `player_count` | Nombre de joueurs, minimum 3 (`__post_init__` lève `ValueError` sinon). |
-| `--first-trick-opener-id N` | `first_trick_opener_id` | Joueur ouvrant le tout premier pli de la partie (manche d'index 0 uniquement ; les manches suivantes sont ouvertes par le `ROLE_SCUM` de la manche précédente, cf. `rules.md` §5.3.1). |
+| `--first-trick-opener-id N` | `first_trick_opener_id` | Joueur ouvrant le tout premier pli de la partie (manche d'index 0 uniquement ; les manches suivantes sont ouvertes par le `ROLE_SCUM` de la manche précédente, cf. [`rules.md`](rules.md) §5.3.1). |
 | `--disable-deck-scaling-auto` | `deck_scaling_auto=False` | Désactive le calcul automatique du nombre de paquets $N_D$. Doit être combiné avec `--forced-deck-count`. |
 | `--forced-deck-count N` | `forced_deck_count` | Nombre de paquets fixé manuellement, effectif uniquement si `deck_scaling_auto` est faux. |
 | `--pass-type {HARD_ONLY,ALLOW_SOFT}` | `pass_type` | Sémantique de passe pour toute la partie. `HARD_ONLY` exclut définitivement un joueur passé du pli en cours ; `ALLOW_SOFT` lui permet de resurenchérir si le tour lui revient dans le même pli. |
-| `--vp-distribution {LEGACY_STEPPED,LINEAR,SYMMETRICAL}` | `vp_distribution_type` | Barème de points de victoire (cf. `rules.md` §4). `SYMMETRICAL` est recommandé pour l'entraînement (centré sur zéro, sans rupture de pente). |
+| `--vp-distribution {LEGACY_STEPPED,LINEAR,SYMMETRICAL}` | `vp_distribution_type` | Barème de points de victoire (cf. [`rules.md`](rules.md) §4). `SYMMETRICAL` est recommandé pour l'entraînement (centré sur zéro, sans rupture de pente). |
 | `--disable-jokers` | `use_jokers=False` | Retire les Jokers du paquet. |
 | `--disable-magic-two` | `magic_two=False` | Désactive la clôture magique historique sur le 2. |
 | `--disable-magic-two-single-clears-all` | `magic_two_single_clears_all=False` | Un 2 seul ne clôture plus un pli de taille supérieure à 1. |
 | `--magic-card-enabled` | `magic_card_enabled=True` | Généralise la clôture magique à un rang paramétrable via `--magic-card-rank`. |
 | `--magic-card-rank R` | `magic_card_rank` | Rang magique (`3` à `2`, hors `JOKER`). |
 | `--disable-magic-single-clears-all` | `magic_single_clears_all=False` | Variante à un rang paramétrable de la règle de clôture par carte unique. |
-| `--skip-on-equal` | `skip_on_equal=True` | Force une réponse de puissance strictement égale après une égalité déclarée (cf. `rules.md` §6.3). |
+| `--skip-on-equal` | `skip_on_equal=True` | Force une réponse de puissance strictement égale après une égalité déclarée (cf. [`rules.md`](rules.md) §6.3). |
 | `--disable-revolution` | `revolution_enabled=False` | Désactive la Révolution. |
 | `--double-revolution-enabled` | `double_revolution_enabled=True` | Active la Double Révolution. Nécessite un nombre de paquets effectif ≥ 2, sous peine de `ValueError` au démarrage. |
 | `--straights-enabled` | `straights_enabled=True` | Active les combinaisons de type suite. |
@@ -886,7 +886,7 @@ Le profil demandé n'existe pas dans `_AGENT_REGISTRY` de `play_game.py`. Les pr
 Vérifier que le profil du siège concerné est bien `human` dans `--seats`, et que le nombre de profils correspond exactement à `--player-count`.
 
 **`RuntimeError: État incohérent détecté : pli ... dépasse ... actions sans clôture.`**
-Cette garde de sécurité, définie dans `engine.round.run_round` (`_MAX_ACTIONS_PER_TRICK`), signale une configuration de règles produisant un pli qui ne se clôture jamais (typiquement `pass_type` mal choisi conjointement à `skip_on_equal`, cf. `rules.md` §6.3, note de cohérence). Vérifier la cohérence de `--pass-type` avec les autres règles actives, en particulier `skip_on_equal` et `finish_penalty_extended`.
+Cette garde de sécurité, définie dans `engine.round.run_round` (`_MAX_ACTIONS_PER_TRICK`), signale une configuration de règles produisant un pli qui ne se clôture jamais (typiquement `pass_type` mal choisi conjointement à `skip_on_equal`, cf. [`rules.md`](rules.md) §6.3, note de cohérence). Vérifier la cohérence de `--pass-type` avec les autres règles actives, en particulier `skip_on_equal` et `finish_penalty_extended`.
 
 **`ImportError` sur `pynvml` lors de l'utilisation de `LiveMonitor`**
 Sans effet bloquant : `_try_init_nvml` capture l'absence du paquet ou l'échec d'initialisation et affiche `indisponible` pour la métrique GPU. Installer `pynvml` (déjà listé dans `requirements.txt`) et disposer d'un pilote NVIDIA compatible pour obtenir la métrique réelle.
