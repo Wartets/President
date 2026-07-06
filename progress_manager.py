@@ -21,7 +21,7 @@ from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
 from rich.progress import (
-    BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn,
+    BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TaskID, TextColumn,
     TimeElapsedColumn, TimeRemainingColumn,
 )
 
@@ -65,7 +65,7 @@ class ProgressManager:
             transient=False,
         )
         self._summary_lines: List[str] = []
-        self._throttles: Dict[int, _TaskThrottle] = {}
+        self._throttles: Dict[TaskID, _TaskThrottle] = {}
         self._live: Optional[Live] = None
         self._lock = threading.Lock()
 
@@ -104,7 +104,7 @@ class ProgressManager:
         total: Optional[float] = None,
         min_interval_seconds: float = 0.15,
         min_step_interval: int = 1,
-    ) -> int:
+    ) -> TaskID:
         """
         Enregistre une nouvelle barre de progression.
 
@@ -126,7 +126,7 @@ class ProgressManager:
 
     def advance(
         self,
-        task_id: int,
+        task_id: TaskID,
         advance: float = 1.0,
         description: Optional[str] = None,
         force: bool = False,
@@ -160,7 +160,7 @@ class ProgressManager:
         if should_render and self._live is not None:
             self._live.update(self._render())
 
-    def complete_task(self, task_id: int, description: Optional[str] = None) -> None:
+    def complete_task(self, task_id: TaskID, description: Optional[str] = None) -> None:
         """
         Marque une tâche comme entièrement terminée et force un dernier rafraîchissement.
 
@@ -178,7 +178,7 @@ class ProgressManager:
         if self._live is not None:
             self._live.update(self._render())
 
-    def remove_task(self, task_id: int) -> None:
+    def remove_task(self, task_id: TaskID) -> None:
         """
         Retire définitivement une barre de progression de l'affichage.
 

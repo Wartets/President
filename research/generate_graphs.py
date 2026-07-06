@@ -142,7 +142,7 @@ def _expand_payload(df: pd.DataFrame, event_type: str) -> pd.DataFrame:
     if subset.empty:
         return subset
     payloads = subset["payload"].apply(json.loads)
-    payload_df = pd.json_normalize(payloads)
+    payload_df = pd.json_normalize(payloads.tolist())
     payload_df.index = subset.index
     return pd.concat([subset.drop(columns=["payload"]), payload_df], axis=1)
 
@@ -327,7 +327,7 @@ def _plot_gini_histogram(round_start_df: pd.DataFrame, output_dir: str) -> None:
         .reset_index(name="gini")
     )
     fig, ax = plt.subplots(figsize=(8, 5))
-    sns.histplot(gini_per_round["gini"], kde=True, ax=ax)
+    sns.histplot(data=gini_per_round, x="gini", kde=True, ax=ax)
     ax.set_xlabel("Indice de Gini de la puissance de main initiale")
     ax.set_ylabel("Nombre de manches")
     ax.set_title("Répartition de l'indice de Gini des mains initiales")
@@ -515,7 +515,7 @@ def _plot_skip_turn_magnitude(rule_triggered_df: pd.DataFrame, output_dir: str) 
     if skip_events.empty:
         return
     fig, ax = plt.subplots(figsize=(7, 5))
-    sns.histplot(skip_events["magnitude"], discrete=True, ax=ax)
+    sns.histplot(data=skip_events, x="magnitude", discrete=True, ax=ax)
     ax.set_xlabel("Nombre de joueurs sautés")
     ax.set_ylabel("Occurrences")
     ax.set_title("Magnitude du Saut de Tour")

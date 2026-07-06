@@ -35,6 +35,7 @@ from agents.lookahead_bot import LookaheadBot
 from agents.mcts_bot import MCTSBot
 from agents.random_bot import RandomBot
 from agents.rule_based_bot import RuleBasedBot
+from agents.scoring_bot import ScoringBot
 from analytics.event_logger import EventLogger
 from analytics.live_monitor import LiveMonitor
 from analytics.metrics_calc import (
@@ -52,6 +53,7 @@ _AGENT_REGISTRY: Dict[str, Type[Any]] = {
     "random_bot": RandomBot,
     "lookahead_bot": LookaheadBot,
     "adaptive_bot": AdaptiveBot,
+    "scoring_bot": ScoringBot,
     "mcts_bot": MCTSBot,
 }
 

@@ -30,12 +30,12 @@ Le projet implémente une version paramétrable du jeu de cartes Président, ave
 * un moteur de règles pur et sans effet de bord (`core.rules_engine`, `core.math_utils`, `core.models`, `core.config`) ;
 * un moteur d'exécution de manche complète orienté événements (`engine.round.run_round`, `engine.game_runner.Game`) ;
 * un moteur d'exécution vectorisé `numpy` pour l'entraînement à haut débit, sans passer par le système d'événements (`training.fast_path.FastPathEngine`) ;
-* cinq profils d'agents prêts à l'emploi (`random_bot`, `greedy_bot`, `rule_based_bot`, `mcts_bot`, `human_agent`) plus deux agents entraînables sélectionnables au même titre via leur nom de module (`rl_agent` à politique linéaire, `torch_rl_agent` à politique neuronale), chaque nom de profil correspondant exactement au fichier `agents/<profil>.py` qui le définit ;
+* huit profils d'agents prêts à l'emploi, détaillés en [section 4.2](#42-sièges-disponibles---seats) (`random_bot`, `greedy_bot`, `rule_based_bot`, `lookahead_bot`, `adaptive_bot`, `scoring_bot`, `mcts_bot`, `human_agent`) plus deux agents entraînables sélectionnables au même titre via leur nom de module (`rl_agent` à politique linéaire, `torch_rl_agent` à politique neuronale), chaque nom de profil correspondant exactement au fichier `agents/<profil>.py` qui le définit ; voir la hiérarchie de complexité complète dans [`architecture.md`, section 5.3](architecture.md#53-gradation-algorithmique-des-profils-fournis) ;
 * un système d'événements complet (`events.structural`, `events.transactional`, `engine.event_bus.EventBus`) permettant de journaliser, rejouer et analyser n'importe quelle partie ;
 * une couche d'analyse (`analytics.event_logger.EventLogger`, `analytics.metrics_calc`) transformant le flux d'événements en métriques exploitables (Gini, entropie, taux de passe sous-optimal, matrice de transition de rôles, etc.) ;
 * une chaîne d'entraînement distribué complète (`training.rollout_worker.RolloutWorker`, `training.replay_buffer.RedisReplayBuffer`, `training.trainer.Trainer`, `training.launch_distributed`), reposant sur `ray` pour la parallélisation et `redis` comme tampon de rejeu partagé.
 
-L'intégralité des règles avancées (Révolution, Double Révolution, Suites, Jokers, clôture magique généralisée, Saut de Tour, Interception, Putsch, Taxe Aveugle, pénalités de sortie étendues) est paramétrable via `core.config.GameConfig` et documentée précisément dans [`rules.md`](rules.md). Ce guide se concentre sur l'utilisation opérationnelle du code ; se reporter à [`rules.md`](rules.md) pour la spécification mathématique complète de chaque règle.
+L'intégralité des règles avancées (Révolution, Double Révolution, Suites, Jokers, clôture magique généralisée, Saut de Tour, Interception, Putsch, Taxe Aveugle, pénalités de sortie étendues) est paramétrable via `core.config.GameConfig` et documentée précisément dans [`rules.md`, section 6](rules.md#6-règles-supplémentaires-et-événements-de-jeu). Ce guide se concentre sur l'utilisation opérationnelle du code ; se reporter à [`rules.md`](rules.md#table-des-matières) pour la spécification mathématique complète de chaque règle.
 
 ## 2. Installation
 
@@ -84,7 +84,7 @@ Aucune saisie clavier n'est requise puisque les quatre sièges sont automatisés
 | `events.base` | Classe abstraite `Event` et `compute_state_hash`. |
 | `events.structural` | Événements macroscopiques : configuration, démarrage, distribution, ouverture/clôture de pli, sortie de joueur, fin de manche. |
 | `events.transactional` | Événements de décision individuelle : échange, Putsch, action jouée, interception, déclenchement de règle. |
-| `agents.*` | Implémentations concrètes de `agents.interface.AbstractBaseAgent`. |
+| `agents.*` | Implémentations concrètes de `agents.interface.AbstractBaseAgent` (dont `random_bot`, `greedy_bot`, `rule_based_bot`, `lookahead_bot`, `adaptive_bot`, `scoring_bot`, `mcts_bot`, `human_agent`, `rl_agent`, `torch_rl_agent`), voir [section 4.2](#42-sièges-disponibles---seats) et [`architecture.md`, section 5](architecture.md#5-la-couche-dagents-et-le-contrat-polymorphe-agents). |
 | `analytics.event_logger` | `EventLogger`, abonné du bus qui accumule les événements et les exporte (JSONL, Parquet, DataFrame Polars). |
 | `analytics.metrics_calc` | Bibliothèque de métriques pures consommant un `EventLogger`. |
 | `analytics.live_monitor` | Tableau de bord console `rich` pour le suivi temps réel d'une campagne de simulation. |
@@ -109,7 +109,7 @@ python play_game.py --player-count 4 --seats human,greedy,greedy,greedy --rounds
 
 ### 4.2. Sièges disponibles (`--seats`)
 
-`--seats` attend une liste de profils séparés par des virgules, de taille strictement égale à `--player-count` (`_build_seat_profiles` lève `ValueError` sinon). Profils disponibles, définis dans `_AGENT_REGISTRY` :
+`--seats` attend une liste de profils séparés par des virgules, de taille strictement égale à `--player-count` (`_build_seat_profiles` lève `ValueError` sinon). Profils disponibles, définis dans `_AGENT_REGISTRY`, classés par ordre de complexité croissante (voir [`architecture.md`, section 5.3](architecture.md#53-gradation-algorithmique-des-profils-fournis) pour le détail de cette hiérarchie) :
 
 | Profil | Classe | Comportement |
 | :--- | :--- | :--- |
@@ -117,11 +117,14 @@ python play_game.py --player-count 4 --seats human,greedy,greedy,greedy --rounds
 | `random_bot` | `agents.random_bot.RandomBot` | Choisit uniformément une option légale parmi toutes celles disponibles (uniformes et suites). |
 | `greedy_bot` | `agents.greedy_bot.GreedyBot` | Joue systématiquement la combinaison légale de puissance résultante minimale. |
 | `rule_based_bot` | `agents.rule_based_bot.RuleBasedBot` | Applique des heuristiques déterministes : évite de déclencher la pénalité de sortie étendue quand une alternative existe, préserve les combinaisons de taille ≥ 4 tant que la main compte plus de 4 cartes, puis choisit la puissance minimale suffisante. |
+| `lookahead_bot` | `agents.lookahead_bot.LookaheadBot` | Étend `RuleBasedBot` d'une anticipation locale : parmi les options de puissance résultante minimale à égalité, retient celle qui laisse la main résiduelle la plus flexible (nombre de combinaisons encore jouables après retrait). |
+| `adaptive_bot` | `agents.adaptive_bot.AdaptiveBot` | Ajuste dynamiquement son filtre de réserve de combinaisons selon la position relative de sa main face aux adversaires actifs : relâche le filtre en cas de retard, le resserre en cas d'avance. |
+| `scoring_bot` | `agents.scoring_bot.ScoringBot` | Évalue chaque option par un score composite continu (puissance résultante normalisée, coût de taille relatif à la main, pénalité de rareté de la puissance dépensée) plutôt que par une cascade de filtres discrets. |
 | `mcts_bot` | `agents.mcts_bot.MCTSBot` | Évalue chaque option candidate par 24 rollouts simulés (paramétrable via le constructeur, `rollout_count`) joués par des `GreedyBot` de référence, et retient l'option au meilleur taux de victoire (rang de sortie ≤ 1) simulé. Coût nettement supérieur aux autres profils : à réserver aux parties courtes ou à l'analyse ponctuelle. |
 | `rl_agent` | `agents.rl_agent.RLAgent` | Politique linéaire entraînable. Sans poids fournis via `--weights`, joue avec des poids nuls. |
 | `torch_rl_agent` | `agents.torch_rl_agent.TorchRLAgent` | Politique neuronale entraînable (`PolicyNet`). Sans poids fournis via `--weights`, joue avec un réseau initialisé aléatoirement. |
 
-Chaque clé de profil correspond exactement au nom du module Python définissant la classe d'agent (`agents/<clé>.py`), afin qu'ajouter un agent au registre et retrouver son implémentation soit immédiat.
+Chaque clé de profil correspond exactement au nom du module Python définissant la classe d'agent (`agents/<clé>.py`), afin qu'ajouter un agent au registre et retrouver son implémentation soit immédiat. Voir [section 14](#14-écrire-son-propre-agent) pour la marche à suivre complète d'ajout d'un nouveau profil.
 
 Si `--seats` est omis, le siège 0 reçoit `human_agent` et les suivants `greedy_bot` (comportement par défaut de `_build_seat_profiles`).
 
@@ -173,7 +176,7 @@ Toutes les options de `GameConfig` sont exposées en ligne de commande sur `play
 | :--- | :--- | :--- |
 | `--seed N` | `random_seed` | Graine de reproductibilité, réutilisée pour toute la distribution et tout tirage aléatoire de la partie. |
 | `--player-count N` | `player_count` | Nombre de joueurs, minimum 3 (`__post_init__` lève `ValueError` sinon). |
-| `--first-trick-opener-id N` | `first_trick_opener_id` | Joueur ouvrant le tout premier pli de la partie (manche d'index 0 uniquement ; les manches suivantes sont ouvertes par le `ROLE_SCUM` de la manche précédente, cf. [`rules.md`](rules.md) §5.3.1). |
+| `--first-trick-opener-id N` | `first_trick_opener_id` | Joueur ouvrant le tout premier pli de la partie (manche d'index 0 uniquement ; les manches suivantes sont ouvertes par le `ROLE_SCUM` de la manche précédente, cf. [`rules.md`, §5.3](rules.md#53-phase-de-jeu-trick_phase), sous-section 5.3.1). |
 | `--disable-deck-scaling-auto` | `deck_scaling_auto=False` | Désactive le calcul automatique du nombre de paquets $N_D$. Doit être combiné avec `--forced-deck-count`. |
 | `--forced-deck-count N` | `forced_deck_count` | Nombre de paquets fixé manuellement, effectif uniquement si `deck_scaling_auto` est faux. |
 | `--pass-type {HARD_ONLY,ALLOW_SOFT}` | `pass_type` | Sémantique de passe pour toute la partie. `HARD_ONLY` exclut définitivement un joueur passé du pli en cours ; `ALLOW_SOFT` lui permet de resurenchérir si le tour lui revient dans le même pli. |
@@ -184,7 +187,7 @@ Toutes les options de `GameConfig` sont exposées en ligne de commande sur `play
 | `--magic-card-enabled` | `magic_card_enabled=True` | Généralise la clôture magique à un rang paramétrable via `--magic-card-rank`. |
 | `--magic-card-rank R` | `magic_card_rank` | Rang magique (`3` à `2`, hors `JOKER`). |
 | `--disable-magic-single-clears-all` | `magic_single_clears_all=False` | Variante à un rang paramétrable de la règle de clôture par carte unique. |
-| `--skip-on-equal` | `skip_on_equal=True` | Force une réponse de puissance strictement égale après une égalité déclarée (cf. [`rules.md`](rules.md) §6.3). |
+| `--skip-on-equal` | `skip_on_equal=True` | Force une réponse de puissance strictement égale après une égalité déclarée (cf. [`rules.md`, §6.3](rules.md#63-forçage-par-égalité-skip_on_equal)). |
 | `--disable-revolution` | `revolution_enabled=False` | Désactive la Révolution. |
 | `--double-revolution-enabled` | `double_revolution_enabled=True` | Active la Double Révolution. Nécessite un nombre de paquets effectif ≥ 2, sous peine de `ValueError` au démarrage. |
 | `--straights-enabled` | `straights_enabled=True` | Active les combinaisons de type suite. |
@@ -464,7 +467,7 @@ python -m research.run_simulation --games 1000 --player-count 4 --rounds-per-gam
   --agent-profile rule_based_bot --workers 4 --output research_output.parquet --seed 0
 ```
 
-`--agent-profile` accepte `greedy_bot`, `rule_based_bot`, `random_bot`, `mcts_bot`, `rl_agent`, `torch_rl_agent`, appliqué à l'ensemble des sièges de toutes les parties simulées (`_AGENT_REGISTRY`/`_TRAINED_AGENT_PROFILES` de `research/run_simulation.py`), les deux derniers nécessitant `--weights-path` pour charger des poids entraînés (le siège 0 reçoit l'agent entraîné, les sièges suivants reçoivent `rule_based_bot` par défaut). Pour composer une partie hétérogène plutôt qu'un profil unique, utiliser `--seat-profiles` (liste de profils séparés par des virgules, taille `--player-count`) et, le cas échéant, `--seat-weights` (liste de couples `siège:chemin` séparés par des virgules, ciblant les sièges de profil entraînable) :
+`--agent-profile` accepte `greedy_bot`, `rule_based_bot`, `random_bot`, `lookahead_bot`, `adaptive_bot`, `scoring_bot`, `mcts_bot`, `rl_agent`, `torch_rl_agent`, appliqué à l'ensemble des sièges de toutes les parties simulées (`_AGENT_REGISTRY`/`_TRAINED_AGENT_PROFILES` de `research/run_simulation.py`), les deux derniers nécessitant `--weights-path` pour charger des poids entraînés (le siège 0 reçoit l'agent entraîné, les sièges suivants reçoivent `rule_based_bot` par défaut). Voir [section 4.2](#42-sièges-disponibles---seats) pour le détail du comportement de chaque profil heuristique. Pour composer une partie hétérogène plutôt qu'un profil unique, utiliser `--seat-profiles` (liste de profils séparés par des virgules, taille `--player-count`) et, le cas échéant, `--seat-weights` (liste de couples `siège:chemin` séparés par des virgules, ciblant les sièges de profil entraînable) :
 
 ```bash
 python -m research.run_simulation --games 500 --player-count 4 --rounds-per-game 10 \
@@ -474,6 +477,13 @@ python -m research.run_simulation --games 500 --player-count 4 --rounds-per-game
 ```
 
 Le nombre de parties est réparti aussi équitablement que possible entre `--workers` acteurs Ray (`GameSimulationWorker`), chacun exécutant séquentiellement son lot avec une graine dérivée distincte (`base_seed + offset`) garantissant la reproductibilité de chaque partie individuelle.
+
+Exemple avec le profil à score composite `scoring_bot` :
+
+```bash
+python -m research.run_simulation --games 500 --player-count 4 --rounds-per-game 10 \
+  --agent-profile scoring_bot --workers 4 --output scoring_bot_output.parquet --seed 0
+```
 
 Pendant l'exécution, un tableau de bord `rich` (`LiveMonitor`) affiche le débit de parties par seconde, l'utilisation CPU/mémoire/GPU, et un résumé de la distribution des VP observés. Une barre de progression `tqdm` suit en parallèle le nombre de lots d'acteurs Ray achevés.
 
@@ -852,6 +862,8 @@ from agents.first_option_bot import FirstOptionBot
 _AGENT_REGISTRY["first_option"] = FirstOptionBot
 ```
 
+Pour un exemple réel plus élaboré combinant plusieurs critères pondérés plutôt qu'une unique règle de choix, voir `agents/scoring_bot.py` (`ScoringBot`), décrit dans [`architecture.md`, section 5.3](architecture.md#53-gradation-algorithmique-des-profils-fournis) et référencé dans le tableau de [section 4.2](#42-sièges-disponibles---seats).
+
 ## 15. Suivi en temps réel d'une campagne (`analytics.live_monitor.LiveMonitor`)
 
 `LiveMonitor` s'utilise comme gestionnaire de contexte, autour de n'importe quelle boucle de simulation personnalisée :
@@ -907,7 +919,7 @@ Relit l'ensemble des fichiers Parquet segmentés, résumés CSV, manifestes et h
 et écrit chaque graphique dans `figures/` (fichiers `.png` pour les tracés statiques `matplotlib`/`seaborn`, fichiers `.html` pour les
 graphiques interactifs `plotly`). Chaque graphique est généré indépendamment des autres : l'absence d'une source de données (par exemple
 aucune évaluation comparative encore produite) n'empêche pas la génération des graphiques dont les données sont disponibles. Un modèle
-scientifique des résultats attendus pour chaque graphique est disponible séparément, destiné à servir de base à des tests de validation de
+scientifique des résultats attendus pour chaque graphique, avec renvoi vers la section de [`rules.md`](rules.md#table-des-matières) qui définit la mécanique testée, est disponible dans [`expected_results.md`](expected_results.md), destiné à servir de base à des tests de validation de
 l'implémentation.
 
 ## 18. Pipeline automatique complet de bout en bout (`research.run_pipeline`)

@@ -1,4 +1,31 @@
-# SPÉCIFICATION FORMELLE DES RÈGLES
+# RÈGLES
+
+## Table des matières
+
+1. [Définitions Fondamentales et Vocabulaire](#1-définitions-fondamentales-et-vocabulaire)
+2. [Configuration (`GameConfig`)](#2-configuration-gameconfig)
+3. [Matériel, Dimensionnement et Hiérarchie Mathématique](#3-matériel-dimensionnement-et-hiérarchie-mathématique)
+   - 3.1. [Le Paquet (`Deck`)](#31-le-paquet-deck)
+   - 3.2. [Fonctions de Valeur](#32-fonctions-de-valeur)
+4. [Rôles et Points de Victoire (`VictoryPoints`)](#4-rôles-et-points-de-victoire-victorypoints)
+5. [Algorithme d'une Manche (`Round`)](#5-algorithme-dune-manche-round)
+   - 5.1. [Phase Initiale](#51-phase-initiale)
+   - 5.2. [Échange (`exchange_phase`)](#52-échange-exchange_phase)
+   - 5.3. [Phase de Jeu (`trick_phase`)](#53-phase-de-jeu-trick_phase)
+   - 5.4. [Fin de Manche (`round_closing`)](#54-fin-de-manche-round_closing)
+6. [Règles Supplémentaires et Événements de Jeu](#6-règles-supplémentaires-et-événements-de-jeu)
+   - 6.1. [Modificateurs de Pré-Manche (`pre_round_modifiers`)](#61-modificateurs-de-pré-manche-pre_round_modifiers)
+   - 6.2. [Clôture Magique Alternative (`magic_card`)](#62-clôture-magique-alternative-magic_card)
+   - 6.3. [Forçage par Égalité (`skip_on_equal`)](#63-forçage-par-égalité-skip_on_equal)
+   - 6.4. [Substitution Joker (`use_jokers`)](#64-substitution-joker-use_jokers)
+   - 6.5. [Révolution et Double Révolution](#65-révolution-et-double-révolution-revolution_enabled-double_revolution_enabled)
+   - 6.6. [Les Suites / Escaliers (`straights_enabled`)](#66-les-suites--escaliers-straights_enabled)
+   - 6.7. [Saut de Tour (`skip_turn_enabled`)](#67-saut-de-tour-skip_turn_enabled)
+   - 6.8. [L'Interception / Fermeture à la volée (`interception_enabled`)](#68-linterception--fermeture-à-la-volée-interception_enabled)
+   - 6.9. [Extension des Pénalités de Clôture (`finish_penalty_extended`)](#69-extension-des-pénalités-de-clôture-finish_penalty_extended)
+7. [Matrice de Compatibilité et Résolution des Conflits (Truth Table)](#7-matrice-de-compatibilité-et-résolution-des-conflits-truth-table)
+
+Ce document est la référence normative citée par [`architecture.md`](architecture.md#1-principes-de-conception-globaux) (rationale d'implémentation) et par [`expected_results.md`](expected_results.md) (résultats statistiques attendus par mécanique).
 
 ## 1. Définitions Fondamentales et Vocabulaire
 
@@ -90,9 +117,11 @@ Pour toute carte $c \neq Joker$, la puissance standard $f_{std}(c)$ est identiqu
 
 $$f_{power}(c, E_{rev}) = \begin{cases} 16 & \text{si } c = Joker \\ f_{std}(c) & \text{si } E_{rev} = False \\ 18 - f_{std}(c) & \text{si } E_{rev} = True \end{cases}$$
 
+Le mécanisme qui fait basculer $E_{rev}$ en cours de partie est détaillé en [§6.5](#65-révolution-et-double-révolution-revolution_enabled-double_revolution_enabled).
+
 ## 4. Rôles et Points de Victoire (`VictoryPoints`)
 
-À la clôture de $R_m$, on obtient la liste de sortie $O = [p_{o_0}, p_{o_1}, ..., p_{o_{N-1}}]$, où l'index $k$ correspond à l'ordre de sortie ($k=0$ étant le premier joueur à finir).
+À la clôture de $R_m$, on obtient la liste de sortie $O = [p_{o_0}, p_{o_1}, ..., p_{o_{N-1}}]$, où l'index $k$ correspond à l'ordre de sortie ($k=0$ étant le premier joueur à finir). Cette liste $O$ est construite progressivement au fil de la manche et finalisée en [§5.4](#54-fin-de-manche-round_closing).
 
 **Attribution des rôles (indépendante du mode de calcul des VP) :**
 *   $k = 0$ : `ROLE_PRESIDENT`
@@ -201,7 +230,7 @@ Interviennent lors des phases 5.1 et 5.2.
 Généralisation de la règle du 2. Soit $Card_{magic}$ le rang défini par `magic_card_rank` (par défaut 2, mais peut être 10, etc.).
 *   Si `ACTION_PLAY` contient une carte $c$ où $rank(c) == Card_{magic}$, `is_closed` devient **immédiatement** `True`. Le joueur posant la combinaison remporte le `Trick`.
 *   *Interaction avec $X$* : Si `magic_single_clears_all == True`, un joueur peut répondre à un `Trick` de taille $X$ par $C$ où $|C| = 1$ et $rank(c \in C) == Card_{magic}$.
-*   *Interaction avec Révolution* : Si $E_{rev} == True$, $Card_{magic}$ devient dynamiquement le rang possédant la valeur $f_{power}$ symétriquement opposée (ex : si le 2 est magique, en Révolution le 3 devient magique, sauf paramétrage contraire en valeur absolue).
+*   *Interaction avec Révolution* : Si $E_{rev} == True$, $Card_{magic}$ devient dynamiquement le rang possédant la valeur $f_{power}$ symétriquement opposée (ex : si le 2 est magique, en Révolution le 3 devient magique, sauf paramétrage contraire en valeur absolue). Voir [§6.5](#65-révolution-et-double-révolution-revolution_enabled-double_revolution_enabled) pour le déclenchement de la Révolution elle-même, et la résolution [C] de la [matrice de compatibilité (§7)](#7-matrice-de-compatibilité-et-résolution-des-conflits-truth-table) pour la formalisation complète de ce remappage.
 
 ### 6.3. Forçage par Égalité (`skip_on_equal`)
 *   Si $A_{t+1}$ est `ACTION_PLAY` tel que $f_{power}(C_{t+1}) == P_{current}$, l'état global passe à `is_equal_forced = True`.
@@ -211,7 +240,7 @@ Généralisation de la règle du 2. Soit $Card_{magic}$ le rang défini par `mag
 
 ### 6.4. Substitution Joker (`use_jokers`)
 *   Les Jokers agissent comme `Wildcard`. Dans une `Combination` $C$ ($X \ge 2$), un Joker $j$ prend la valeur $f_{power}$ de $c_{std} \in C$, précisée par le champ `declared_power` de l'`Action`.
-*   Restriction : Un Joker $j \in C$ invalide mathématiquement la possibilité pour $C$ de déclencher la règle 6.5 (`revolution_enabled`).
+* Restriction : Un Joker $j \in C$ invalide mathématiquement la possibilité pour $C$ de déclencher la règle [§6.5](#65-révolution-et-double-révolution-revolution_enabled-double_revolution_enabled) (`revolution_enabled`), voir résolution [A] de la [matrice de compatibilité (§7)](#7-matrice-de-compatibilité-et-résolution-des-conflits-truth-table).
 
 ### 6.5. Révolution et Double Révolution (`revolution_enabled`, `double_revolution_enabled`)
 Soit la variable d'état de verrouillage $L_{rev} \in \{True, False\}$, réinitialisée à `False` au début de chaque `Round`.

@@ -20,6 +20,7 @@ from agents.lookahead_bot import LookaheadBot
 from agents.mcts_bot import MCTSBot
 from agents.random_bot import RandomBot
 from agents.rule_based_bot import RuleBasedBot
+from agents.scoring_bot import ScoringBot
 from core.config import (
     PASS_TYPE_ALLOW_SOFT, PASS_TYPE_HARD_ONLY, PENALTY_DRAW_CARDS,
     PENALTY_INSTANT_SCUM, ROLE_NEUTRAL, ROLE_PRESIDENT, ROLE_SCUM,
@@ -41,6 +42,7 @@ _AGENT_REGISTRY: Dict[str, Callable[[int, GameConfig], AbstractBaseAgent]] = {
     "rule_based_bot": RuleBasedBot,
     "lookahead_bot": LookaheadBot,
     "adaptive_bot": AdaptiveBot,
+    "scoring_bot": ScoringBot,
     "mcts_bot": MCTSBot,
 }
 
