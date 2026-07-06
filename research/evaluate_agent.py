@@ -168,10 +168,11 @@ def main() -> None:
     """
     Point d'entrée en ligne de commande de l'évaluation comparative.
 
-    Retourne `None`. Effet de bord : lit les arguments de la ligne de commande et invoque `launch_evaluation`.
+    Retourne `None`. Effet de bord : lit les arguments de la ligne de commande et invoque `launch_evaluation`, ou affiche des informations de
+    contrôle (`--list-profiles`, `--list-presets`) sans lancer de campagne.
     """
     parser = argparse.ArgumentParser(description="Évaluation comparative d'agents et de modèles entraînés")
-    parser.add_argument("--seat-profiles", type=str, required=True)
+    parser.add_argument("--seat-profiles", type=str, default=None)
     parser.add_argument("--seat-weights", type=str, default=None)
     parser.add_argument("--games", type=int, default=200)
     parser.add_argument("--rounds-per-game", type=int, default=20)
@@ -180,7 +181,32 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--experiment-name", type=str, default="evaluation")
     parser.add_argument("--output", type=str, default=None)
+    parser.add_argument(
+        "--list-profiles", action="store_true",
+        help="Affiche la liste des profils de siège disponibles puis quitte sans lancer de campagne.",
+    )
+    parser.add_argument(
+        "--list-presets", action="store_true",
+        help="Affiche la liste des présets de règles disponibles puis quitte sans lancer de campagne.",
+    )
     args = parser.parse_args()
+
+    if args.list_profiles:
+        from research.run_simulation import _ALL_SEAT_PROFILES, _TRAINED_AGENT_PROFILES
+        print("Profils de siège disponibles :")
+        for profile in _ALL_SEAT_PROFILES:
+            trained_note = " (entraînable, nécessite --seat-weights)" if profile in _TRAINED_AGENT_PROFILES else ""
+            print(f"  - {profile}{trained_note}")
+        return
+
+    if args.list_presets:
+        print("Présets de règles disponibles :")
+        for preset_name in _RULE_PRESETS:
+            print(f"  - {preset_name}")
+        return
+
+    if not args.seat_profiles:
+        parser.error("--seat-profiles est requis en dehors de --list-profiles/--list-presets.")
 
     seat_profiles = [token.strip() for token in args.seat_profiles.split(",") if token.strip()]
 

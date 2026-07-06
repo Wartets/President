@@ -20,6 +20,8 @@ Ce document décrit intégralement le fonctionnement du projet : installation, p
 14. Écrire son propre agent
 15. Suivi en temps réel d'une campagne (`analytics.live_monitor`)
 16. Dépannage
+17. Génération non interactive des graphiques (`research.generate_graphs`)
+18. Pipeline automatique complet de bout en bout (`research.run_pipeline`)
 
 ## 1. Présentation générale du projet
 
@@ -894,3 +896,37 @@ Sans effet bloquant : `_try_init_nvml` capture l'absence du paquet ou l'échec d
 
 **Résultats non reproductibles malgré un `--seed` fixé**
 La reproductibilité garantie par `random_seed` couvre la distribution des mains (`core.rules_engine.deal_hands`, dérivée de `f"{random_seed}:{round_index}"`) et les tirages internes déterministes des agents fournis (`random.Random(f"{config.random_seed}:{player_id}")`). Un agent personnalisé utilisant une source d'aléa non dérivée de `config.random_seed`, ou une exécution distribuée avec ordre d'arrivée non déterministe des transitions Redis, ne garantit pas la reproductibilité stricte d'une campagne entière.
+
+## 17. Génération non interactive des graphiques (`research.generate_graphs`)
+
+```bash
+python -m research.generate_graphs
+```
+
+Relit l'ensemble des fichiers Parquet segmentés, résumés CSV, manifestes et historiques d'entraînement présents dans `data/` et `weights/`,
+et écrit chaque graphique dans `figures/` (fichiers `.png` pour les tracés statiques `matplotlib`/`seaborn`, fichiers `.html` pour les
+graphiques interactifs `plotly`). Chaque graphique est généré indépendamment des autres : l'absence d'une source de données (par exemple
+aucune évaluation comparative encore produite) n'empêche pas la génération des graphiques dont les données sont disponibles. Un modèle
+scientifique des résultats attendus pour chaque graphique est disponible séparément, destiné à servir de base à des tests de validation de
+l'implémentation.
+
+## 18. Pipeline automatique complet de bout en bout (`research.run_pipeline`)
+
+```bash
+python -m research.run_pipeline --player-count 4 --training-rounds 2000 \
+  --baseline-games-per-profile 100 --evaluation-games 200
+```
+
+Exécute, sans aucune intervention humaine, l'intégralité du cycle de recherche : entraînement de l'agent à politique linéaire
+(`training.train_rl`), tentative d'entraînement distribué de l'agent à politique neuronale si un serveur Redis est joignable sur
+`--redis-host`/`--redis-port` (ignorée proprement sinon), simulations de référence pour chaque profil heuristique disponible, évaluation
+comparative de l'agent entraîné contre ces profils, génération de l'ensemble des graphiques (`research.generate_graphs`), puis rédaction
+d'un rapport de synthèse dans `data/final_report.md`.
+
+La progression est journalisée dans `data/pipeline_state.json`. Si l'exécution est interrompue (arrêt manuel, panne), un nouveau lancement de
+la même commande reprend automatiquement à la première étape non marquée comme terminée, sans recommencer le travail déjà accompli. L'option
+`--reset` supprime ce fichier d'état et force une reprise complète depuis le début :
+
+```bash
+python -m research.run_pipeline --reset
+```

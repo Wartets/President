@@ -291,3 +291,21 @@ training.launch_distributed.launch(...)
 * Le tampon Redis ne priorise pas l'échantillonnage (section 8.3) ; l'introduction d'un tampon à priorité (par exemple pondéré par la magnitude de l'avantage observé) est un point d'extension direct de `RedisReplayBuffer.sample`, sans impact sur l'interface `push`/`push_batch`/`size` consommée par les Rollout Workers.
 * `core.action_masking` et `training.fast_path` maintiennent chacun leur propre encodage d'espace d'action (`(power, size)` contre `(rank_index, size)`) sans passerelle directe entre les deux : un agent entraîné sur l'un des deux espaces ne peut pas être directement transposé vers l'autre sans réécrire une couche de traduction dédiée.
 * L'ajout d'un nouvel agent au registre de `play_game.py` ou de `research.run_simulation` nécessite une modification manuelle du dictionnaire `_AGENT_REGISTRY` correspondant dans chacun de ces deux points d'entrée séparément, ces registres n'étant pas mutualisés entre les deux scripts.
+
+## 12. Couche d'orchestration de bout en bout (`research.run_pipeline`, `research.generate_graphs`)
+
+`research.run_pipeline.run_pipeline` est le point d'entrée unique orchestrant, sans intervention humaine, l'ensemble du cycle de recherche :
+entraînement de l'agent linéaire (`training.train_rl`), tentative d'entraînement distribué de l'agent neuronal (`training.launch_distributed`,
+ignorée proprement si Redis n'est pas joignable plutôt que de bloquer le pipeline), simulations de référence par profil heuristique
+(`research.run_simulation`), évaluation comparative (`research.evaluate_agent`), génération de graphiques (`research.generate_graphs`) et
+rédaction d'un rapport de synthèse. Chaque étape est journalisée dans `data/pipeline_state.json` avec un statut `"done"`/`"failed"` ; une
+étape déjà `"done"` n'est jamais réexécutée, ce qui permet de relancer le pipeline après une interruption (arrêt du processus, panne) sans
+perdre le travail déjà accompli. Une étape en échec ne bloque pas les étapes suivantes et est retentée au prochain lancement.
+
+`research.generate_graphs.generate_all` est la contrepartie non interactive du carnet d'analyse historique : chaque fonction de tracé y est
+isolée et protégée par une garde d'absence de données, de sorte que l'indisponibilité d'une source (par exemple aucun événement
+`EventInterceptionBroadcast` si l'Interception n'a jamais été activée) n'empêche pas la génération des autres graphiques de la même
+exécution.
+
+Un modèle scientifique des résultats statistiquement attendus pour chaque graphique produit par ce module, destiné à servir de base à des
+tests de validation de l'implémentation plutôt qu'à une simple inspection visuelle, est disponible séparément.

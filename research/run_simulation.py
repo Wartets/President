@@ -102,43 +102,71 @@ _RULE_PRESETS: Dict[str, Dict[str, Any]] = {
 }
 
 
-def _build_agents(
-    agent_profile: str,
+def _build_single_agent(
+    profile: str,
+    pid: int,
     config: GameConfig,
     weights_path: Optional[str],
-) -> Dict[int, AbstractBaseAgent]:
+) -> AbstractBaseAgent:
     """
-    Construit l'association joueur/agent pour une partie donnée.
+    Construit l'agent d'un unique siège, y compris pour les profils entraînables.
 
-    Paramètre `agent_profile` : profil demandé, clé de `_AGENT_REGISTRY` ou de `_TRAINED_AGENT_PROFILES`.
+    Paramètre `profile` : nom de profil, clé de `_AGENT_REGISTRY` ou de `_TRAINED_AGENT_PROFILES`.
+    Paramètre `pid` : identifiant du joueur occupant le siège.
     Paramètre `config` : configuration de la partie.
-    Paramètre `weights_path` : chemin d'un fichier de poids entraîné, utilisé uniquement pour les profils de `_TRAINED_AGENT_PROFILES`,
-    l'agent entraîné occupant alors le siège 0.
-    Retourne un dictionnaire complet d'agents, de taille `config.player_count`. Aucun effet de bord hors chargement disque des poids éventuels.
+    Paramètre `weights_path` : chemin d'un fichier de poids entraîné pour ce siège précis, ou `None` si le siège ne charge aucun poids.
+    Retourne une instance de `AbstractBaseAgent`. Aucun effet de bord hors chargement disque des poids éventuels.
     """
-    if agent_profile == "rl_agent":
+    if profile == "rl_agent":
         import numpy as np
         from agents.rl_agent import RLAgent
 
         weights = np.load(weights_path) if weights_path else None
-        agents: Dict[int, AbstractBaseAgent] = {0: RLAgent(0, config, weights=weights, epsilon=0.0)}
-        for pid in range(1, config.player_count):
-            agents[pid] = RuleBasedBot(pid, config)
-        return agents
+        return RLAgent(pid, config, weights=weights, epsilon=0.0)
 
-    if agent_profile == "torch_rl_agent":
+    if profile == "torch_rl_agent":
         from agents.torch_rl_agent import TorchRLAgent
 
-        trained = TorchRLAgent(player_id=0, config=config, epsilon=0.0)
+        trained = TorchRLAgent(player_id=pid, config=config, epsilon=0.0)
         if weights_path:
             trained.load_weights(weights_path)
-        agents = {0: trained}
-        for pid in range(1, config.player_count):
-            agents[pid] = RuleBasedBot(pid, config)
-        return agents
+        return trained
 
-    agent_cls = _AGENT_REGISTRY[agent_profile]
-    return {pid: agent_cls(pid, config) for pid in range(config.player_count)}
+    agent_cls = _AGENT_REGISTRY[profile]
+    return agent_cls(pid, config)
+
+
+def _build_agents(
+    agent_profile: str,
+    config: GameConfig,
+    weights_path: Optional[str],
+    seat_profiles: Optional[List[str]] = None,
+    seat_weights: Optional[Dict[int, str]] = None,
+) -> Dict[int, AbstractBaseAgent]:
+    """
+    Construit l'association joueur/agent pour une partie donnée.
+
+    Paramètre `agent_profile` : profil appliqué à tous les sièges lorsque `seat_profiles` n'est pas fourni, clé de `_AGENT_REGISTRY` ou de
+    `_TRAINED_AGENT_PROFILES`.
+    Paramètre `config` : configuration de la partie.
+    Paramètre `weights_path` : chemin d'un fichier de poids entraîné par défaut, appliqué au siège 0 lorsque celui-ci est d'un profil entraînable
+    et qu'aucune entrée `seat_weights` ne le concerne.
+    Paramètre `seat_profiles` : association ordonnée de profils par siège, un profil distinct par identifiant de joueur ; si `None`, `agent_profile`
+    est appliqué à l'ensemble des sièges.
+    Paramètre `seat_weights` : association entre identifiant de siège et chemin de poids entraîné, prioritaire sur `weights_path` pour le siège
+    concerné.
+    Retourne un dictionnaire complet d'agents, de taille `config.player_count`. Aucun effet de bord hors chargement disque des poids éventuels.
+    """
+    profiles = seat_profiles if seat_profiles is not None else [agent_profile] * config.player_count
+    weights_map = seat_weights or {}
+
+    agents: Dict[int, AbstractBaseAgent] = {}
+    for pid in range(config.player_count):
+        profile = profiles[pid] if pid < len(profiles) else agent_profile
+        default_weights = weights_path if (profile in _TRAINED_AGENT_PROFILES and pid == 0) else None
+        seat_weight_path = weights_map.get(pid, default_weights)
+        agents[pid] = _build_single_agent(profile, pid, config, seat_weight_path)
+    return agents
 
 
 @ray.remote
@@ -342,7 +370,8 @@ def main() -> None:
     """
     Point d'entrée en ligne de commande du lanceur de recherche.
 
-    Retourne `None`. Effet de bord : lit les arguments de la ligne de commande et invoque `launch_research`.
+    Retourne `None`. Effet de bord : lit les arguments de la ligne de commande et invoque `launch_research`, ou affiche des informations de
+    contrôle (`--list-profiles`, `--list-presets`, `--dry-run`) sans lancer de campagne.
     """
     parser = argparse.ArgumentParser(description="Lanceur de simulations massives parallélisées")
     parser.add_argument("--games", type=int, default=1000)
@@ -361,7 +390,32 @@ def main() -> None:
     parser.add_argument("--config-preset", choices=list(_RULE_PRESETS.keys()), default="base")
     parser.add_argument("--weights-path", type=str, default=None)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--list-profiles", action="store_true",
+        help="Affiche la liste des profils de siège disponibles puis quitte sans lancer de campagne.",
+    )
+    parser.add_argument(
+        "--list-presets", action="store_true",
+        help="Affiche la liste des présets de règles disponibles puis quitte sans lancer de campagne.",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Valide la configuration (GameConfig, profils, poids) et affiche le plan d'exécution sans lancer Ray.",
+    )
     args = parser.parse_args()
+
+    if args.list_profiles:
+        print("Profils de siège disponibles :")
+        for profile in _ALL_SEAT_PROFILES:
+            trained_note = " (entraînable, nécessite --weights-path ou --seat-weights)" if profile in _TRAINED_AGENT_PROFILES else ""
+            print(f"  - {profile}{trained_note}")
+        return
+
+    if args.list_presets:
+        print("Présets de règles disponibles :")
+        for preset_name in _RULE_PRESETS:
+            print(f"  - {preset_name}")
+        return
 
     seat_profiles = (
         [token.strip() for token in args.seat_profiles.split(",")] if args.seat_profiles else None
@@ -373,6 +427,19 @@ def main() -> None:
             pid_str, _, path = token.partition(":")
             if path:
                 seat_weights[int(pid_str.strip())] = path.strip()
+
+    if args.dry_run:
+        try:
+            GameConfig(random_seed=args.seed, player_count=args.player_count, **_RULE_PRESETS[args.config_preset])
+        except ValueError as error:
+            print(f"Configuration invalide : {error}")
+            return
+        print("Configuration valide. Plan d'exécution :")
+        print(f"  Parties : {args.games}, joueurs : {args.player_count}, manches/partie : {args.rounds_per_game}")
+        print(f"  Profil uniforme : {args.agent_profile}" if not seat_profiles else f"  Profils de sièges : {seat_profiles}")
+        print(f"  Préset de règles : {args.config_preset}")
+        print(f"  Travailleurs Ray : {args.workers}")
+        return
 
     launch_research(
         args.games, args.player_count, args.rounds_per_game,

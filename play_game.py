@@ -87,6 +87,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seats", type=str, default=None)
     parser.add_argument("--rounds", type=int, default=5)
     parser.add_argument("--weights", type=str, default=None)
+    parser.add_argument("--seat-weights", type=str, default=None)
+    parser.add_argument(
+        "--list-seats", action="store_true",
+        help="Affiche la liste des profils de siège disponibles puis quitte sans démarrer de partie.",
+    )
 
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--player-count", type=int, default=4)
@@ -231,21 +236,41 @@ def main() -> None:
     """
     Point d'entrée en ligne de commande d'une partie interactive.
 
-    Retourne `None`. Effet de bord : lit les arguments de la ligne de commande, instancie les agents désignés par `--seats`, exécute
-    `--rounds` manches via `engine.game_runner.Game`, et affiche un résumé après chaque manche ainsi que le total cumulé en fin de partie.
+    Retourne `None`. Effet de bord : lit les arguments de la ligne de commande, instancie les agents désignés par `--seats`, exécute `--rounds`
+    manches via `engine.game_runner.Game`, et affiche un résumé après chaque manche ainsi que le total cumulé en fin de partie.
+    L'option `--list-seats` affiche la liste des profils disponibles puis quitte sans jouer.
     """
     parser = _build_arg_parser()
     args = parser.parse_args()
+
+    if args.list_seats:
+        valid_profiles = sorted(set(_AGENT_REGISTRY) | set(_TRAINED_AGENT_PROFILES))
+        print("Profils de siège disponibles :")
+        for profile in valid_profiles:
+            trained_note = " (entraînable, nécessite --weights ou --seat-weights)" if profile in _TRAINED_AGENT_PROFILES else ""
+            print(f"  - {profile}{trained_note}")
+        return
 
     config = _build_config(args)
     seat_profiles = _build_seat_profiles(args.seats, config.player_count)
     seat_weights_list = args.weights.split(",") if args.weights else []
 
+    seat_weights_map: Dict[int, str] = {}
+    if args.seat_weights:
+        for token in args.seat_weights.split(","):
+            pid_str, _, path = token.partition(":")
+            if path:
+                seat_weights_map[int(pid_str.strip())] = path.strip()
+
+    def _resolve_weight_path(pid: int) -> str:
+        if pid in seat_weights_map:
+            return seat_weights_map[pid]
+        if pid < len(seat_weights_list):
+            return seat_weights_list[pid].strip()
+        return ""
+
     agents: Dict[int, AbstractBaseAgent] = {
-        pid: _build_seat_agent(
-            profile, pid, config,
-            seat_weights_list[pid].strip() if pid < len(seat_weights_list) else "",
-        )
+        pid: _build_seat_agent(profile, pid, config, _resolve_weight_path(pid))
         for pid, profile in enumerate(seat_profiles)
     }
 
