@@ -33,11 +33,11 @@ from events.structural import (
 from events.transactional import EventActionPlayed, EventExchange, EventRuleTriggered
 
 _AGENT_REGISTRY: Dict[str, Callable[[int, GameConfig], AbstractBaseAgent]] = {
-    "human": HumanAgent,
-    "random": RandomBot,
-    "greedy": GreedyBot,
-    "rule_based": RuleBasedBot,
-    "mcts": MCTSBot,
+    "human_agent": HumanAgent,
+    "random_bot": RandomBot,
+    "greedy_bot": GreedyBot,
+    "rule_based_bot": RuleBasedBot,
+    "mcts_bot": MCTSBot,
 }
 
 _VALID_ROLES = (ROLE_PRESIDENT, ROLE_VICE_PRESIDENT, ROLE_NEUTRAL, ROLE_VICE_SCUM, ROLE_SCUM)
@@ -108,7 +108,7 @@ def _ask_seat_profiles(player_count: int) -> List[str]:
     print("\n--- Choix des profils de siège ---")
     print(f"Profils disponibles : {', '.join(_AGENT_REGISTRY)}")
     for seat in range(player_count):
-        default = "human" if seat == 0 else "greedy"
+        default = "human_agent" if seat == 0 else "greedy_bot"
         raw = input(f"Profil du siège {seat} [{default}] : ").strip()
         profiles.append(raw if raw in _AGENT_REGISTRY else default)
     return profiles

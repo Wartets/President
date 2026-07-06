@@ -1,12 +1,12 @@
 """
 Module de lancement de simulations massives parallélisées.
 
-Le module implémente le lanceur de recherche : distribution de $P$ parties indépendantes sur les cœurs
-disponibles via `ray`, chaque partie accumulant ses événements dans un `EventLogger` dédié, vidangé périodiquement au format Parquet. Le
-module agrège ensuite un sous-ensemble des métriques de `analytics.metrics_calc` sur l'ensemble des parties simulées.
+Le module implémente le lanceur de recherche : distribution de $P$ parties indépendantes sur les cœurs disponibles via `ray`, chaque partie
+accumulant ses événements dans un `EventLogger` dédié, vidangé périodiquement au format Parquet. Le module agrège ensuite un sous-ensemble
+des métriques de `analytics.metrics_calc` sur l'ensemble des parties simulées.
 
-Le module dépend de `ray`, `core.config`, `agents.greedy_bot`, `agents.rule_based_bot`, `agents.random_bot`, `agents.mcts_bot`,
-`engine.game_runner`, `analytics.event_logger`, `analytics.metrics_calc` et `rich`/`tqdm` pour le suivi de progression.
+Le module dépend de `ray`, `core.config`, `agents.greedy_bot`, `agents.rule_based_bot`, `agents.random_bot`, `agents.mcts_bot`, `engine.game_runner`,
+`analytics.event_logger`, `analytics.metrics_calc` et `rich`/`tqdm` pour le suivi de progression.
 """
 from __future__ import annotations
 
@@ -45,17 +45,19 @@ from engine.game_runner import Game
 from events.structural import EventRoundStart
 
 _AGENT_REGISTRY: Dict[str, Type[Any]] = {
-    "greedy": GreedyBot,
-    "rule_based": RuleBasedBot,
-    "random": RandomBot,
-    "mcts": MCTSBot,
+    "greedy_bot": GreedyBot,
+    "rule_based_bot": RuleBasedBot,
+    "random_bot": RandomBot,
+    "mcts_bot": MCTSBot,
 }
 
-# Profils spéciaux dont la construction n'utilise pas directement `_AGENT_REGISTRY`, car ils
-# nécessitent le chargement d'un fichier de poids entraîné (`agents.rl_agent.RLAgent` ou
-# `agents.torch_rl_agent.TorchRLAgent`), le siège 0 recevant l'agent entraîné et les sièges
-# suivants un profil `rule_based` de référence.
+# Profils entraînables dont la construction nécessite le chargement d'un fichier de poids (`agents.rl_agent.RLAgent` ou
+# `agents.torch_rl_agent.TorchRLAgent`). Le nom de chaque profil correspond exactement au nom du module Python dans lequel la classe d'agent est 
+# définie.
 _TRAINED_AGENT_PROFILES = ("rl_agent", "torch_rl_agent")
+
+# Ensemble complet des profils utilisables pour un siège, qu'ils proviennent de `_AGENT_REGISTRY` ou de `_TRAINED_AGENT_PROFILES`.
+_ALL_SEAT_PROFILES = tuple(_AGENT_REGISTRY.keys()) + _TRAINED_AGENT_PROFILES
 
 # Présets nommés de configuration de règles, utilisés par `--config-preset` et par la recherche
 # combinatoire (`research.grid_search`).
@@ -78,7 +80,25 @@ _RULE_PRESETS: Dict[str, Dict[str, Any]] = {
     "magic_rank_10": {"magic_card_enabled": True, "magic_card_rank": "10", "magic_two": False},
     "revolution_off": {"revolution_enabled": False},
     "legacy_vp": {"vp_distribution_type": "LEGACY_STEPPED"},
+    "linear_vp": {"vp_distribution_type": "LINEAR"},
     "allow_soft_pass": {"pass_type": "ALLOW_SOFT"},
+    "skip_turn": {"skip_turn_enabled": True},
+    "double_revolution": {"double_revolution_enabled": True},
+    "putsch_blind_tax": {"putsch_enabled": True, "blind_tax_enabled": True},
+    "finish_penalty_instant": {
+        "finish_penalty_enabled": True,
+        "finish_penalty_extended": True,
+        "no_finish_on_joker": True,
+        "no_finish_on_revolution": True,
+    },
+    "finish_penalty_draw": {
+        "finish_penalty_enabled": True,
+        "finish_penalty_type": "PENALTY_DRAW_CARDS",
+        "finish_penalty_draw_count": 2,
+    },
+    "strict_remainder": {"strict_remainder_allocation": True},
+    "straights_skip_turn": {"straights_enabled": True, "skip_turn_enabled": True},
+    "skip_on_equal": {"skip_on_equal": True},
 }
 
 
@@ -92,10 +112,9 @@ def _build_agents(
 
     Paramètre `agent_profile` : profil demandé, clé de `_AGENT_REGISTRY` ou de `_TRAINED_AGENT_PROFILES`.
     Paramètre `config` : configuration de la partie.
-    Paramètre `weights_path` : chemin d'un fichier de poids entraîné, utilisé uniquement pour les profils de
-    `_TRAINED_AGENT_PROFILES`, l'agent entraîné occupant alors le siège 0.
-    Retourne un dictionnaire complet d'agents, de taille `config.player_count`. Aucun effet de bord hors
-    chargement disque des poids éventuels.
+    Paramètre `weights_path` : chemin d'un fichier de poids entraîné, utilisé uniquement pour les profils de `_TRAINED_AGENT_PROFILES`,
+    l'agent entraîné occupant alors le siège 0.
+    Retourne un dictionnaire complet d'agents, de taille `config.player_count`. Aucun effet de bord hors chargement disque des poids éventuels.
     """
     if agent_profile == "rl_agent":
         import numpy as np
@@ -142,6 +161,8 @@ class GameSimulationWorker:
         game_count: int,
         config_overrides: Optional[Dict[str, Any]] = None,
         weights_path: Optional[str] = None,
+        seat_profiles: Optional[List[str]] = None,
+        seat_weights: Optional[Dict[int, str]] = None,
     ) -> Dict[str, List[dict]]:
         """
         Exécute séquentiellement `game_count` parties complètes et retourne événements et résumés.
@@ -151,12 +172,14 @@ class GameSimulationWorker:
         Paramètre `rounds_per_game` : nombre de manches jouées par partie.
         Paramètre `game_count` : nombre de parties du lot confié à cet acteur.
         Paramètre `config_overrides` : champs supplémentaires de `GameConfig` à appliquer à chaque partie du lot.
-        Paramètre `weights_path` : chemin d'un fichier de poids entraîné, transmis à `_build_agents` pour les profils
-        de `_TRAINED_AGENT_PROFILES`.
-        Retourne un dictionnaire `{"records": ..., "summaries": ...}` : `records` est la liste plate des
-        enregistrements d'événements agrégés sur l'ensemble des parties du lot, `summaries` une liste de
-        dictionnaires de métriques résumées, une entrée par partie. Effet de bord : aucun hors de l'acteur,
-        chaque partie utilise un `EventLogger` et un `Game` locaux et jetables.
+        Paramètre `weights_path` : chemin d'un fichier de poids entraîné par défaut, transmis à `_build_agents` pour les profils de
+        `_TRAINED_AGENT_PROFILES`.
+        Paramètre `seat_profiles` : association ordonnée de profils par siège, permettant de composer une partie hétérogène plutôt qu'un profil
+        unique appliqué à tous les sièges.
+        Paramètre `seat_weights` : association entre identifiant de siège et chemin de poids entraîné.
+        Retourne un dictionnaire `{"records": ..., "summaries": ...}` : `records` est la liste plate des enregistrements d'événements agrégés sur
+        l'ensemble des parties du lot, `summaries` une liste de dictionnaires de métriques résumées, une entrée par partie. Effet de bord : aucun
+        hors de l'acteur, chaque partie utilise un `EventLogger` et un `Game` locaux et jetables.
         """
         overrides = config_overrides or {}
         all_records: List[dict] = []
@@ -164,7 +187,7 @@ class GameSimulationWorker:
         for offset in range(game_count):
             seed = base_seed + offset
             config = GameConfig(random_seed=seed, player_count=player_count, **overrides)
-            agents = _build_agents(self.agent_profile, config, weights_path)
+            agents = _build_agents(self.agent_profile, config, weights_path, seat_profiles, seat_weights)
             logger = EventLogger()
             from engine.event_bus import EventBus
 
@@ -175,8 +198,8 @@ class GameSimulationWorker:
 
             gini_values: List[float] = []
             for round_start in logger.events_of_type(EventRoundStart):
-                hand_powers = {
-                    pid: sum(f_std(c) for c in cards if c.rank.value != "JOKER")
+                hand_powers: Dict[int, float] = {
+                    pid: float(sum(f_std(c) for c in cards if c.rank.value != "JOKER"))
                     for pid, cards in round_start.initial_hands.items()
                 }
                 gini_values.append(gini_initial_hand_power(hand_powers))
@@ -185,6 +208,7 @@ class GameSimulationWorker:
                 "seed": seed,
                 "player_count": player_count,
                 "agent_profile": self.agent_profile,
+                "seat_profiles": ",".join(seat_profiles) if seat_profiles else self.agent_profile,
                 "rounds_per_game": rounds_per_game,
                 "branching_factor_average": branching_factor_average(logger),
                 "action_space_entropy": action_space_entropy(logger),
@@ -211,6 +235,8 @@ def launch_research(
     experiment_name: str = "simulation",
     config_overrides: Optional[Dict[str, Any]] = None,
     weights_path: Optional[str] = None,
+    seat_profiles: Optional[List[str]] = None,
+    seat_weights: Optional[Dict[int, str]] = None,
     return_summary: bool = False,
 ) -> Optional[List[Dict[str, Any]]]:
     """
@@ -221,18 +247,20 @@ def launch_research(
     Paramètre `rounds_per_game` : nombre de manches jouées par partie.
     Paramètre `agent_profile` : profil d'agent appliqué (clé de `_AGENT_REGISTRY` ou de `_TRAINED_AGENT_PROFILES`).
     Paramètre `num_workers` : nombre d'acteurs Ray parallèles, borné par le nombre de cœurs disponibles.
-    Paramètre `output_parquet` : chemin du fichier Parquet de destination, nommé automatiquement selon la
-    convention du projet et placé dans `data/` si `None`.
+    Paramètre `output_parquet` : chemin du fichier Parquet de destination, nommé automatiquement selon la convention du projet et placé dans
+    `data/` si `None`.
     Paramètre `base_seed` : graine de base de la campagne, chaque partie recevant une graine dérivée distincte.
     Paramètre `experiment_name` : nom de la campagne, utilisé pour la nomenclature automatique des fichiers.
-    Paramètre `config_overrides` : champs supplémentaires de `GameConfig` appliqués à toutes les parties de la
-    campagne, par exemple un préset de `_RULE_PRESETS`.
-    Paramètre `weights_path` : chemin d'un fichier de poids entraîné, transmis pour les profils de
-    `_TRAINED_AGENT_PROFILES`.
+    Paramètre `config_overrides` : champs supplémentaires de `GameConfig` appliqués à toutes les parties de la campagne, par exemple un préset
+    de `_RULE_PRESETS`.
+    Paramètre `weights_path` : chemin d'un fichier de poids entraîné, transmis pour les profils de `_TRAINED_AGENT_PROFILES`.
+    Paramètre `seat_profiles` : association ordonnée de profils par siège, permettant de composer une campagne de parties hétérogènes plutôt
+    qu'un profil unique appliqué à tous les sièges de toutes les parties.
+    Paramètre `seat_weights` : association entre identifiant de siège et chemin de poids entraîné, appliquée à chaque partie de la campagne
+    pour les sièges de profil entraînable concernés.
     Paramètre `return_summary` : si vrai, retourne la liste des résumés de métriques par partie plutôt que `None`.
-    Retourne la liste des résumés de métriques par partie si `return_summary` est vrai, sinon `None`. Effet de
-    bord : initialise un cluster Ray local, distribue les parties entre les acteurs, écrit le journal agrégé et
-    le résumé de métriques dans `data/`, et affiche un résumé via `rich`.
+    Retourne la liste des résumés de métriques par partie si `return_summary` est vrai, sinon `None`. Effet de bord : initialise un cluster Ray
+    local, distribue les parties entre les acteurs, écrit le journal agrégé et le résumé de métriques dans `data/`, et affiche un résumé via `rich`.
     """
     console = Console()
     ray.init(num_cpus=num_workers, ignore_reinit_error=True, log_to_driver=False)
@@ -251,6 +279,7 @@ def launch_research(
             continue
         future = worker.run_batch.remote(
             seed_cursor, player_count, rounds_per_game, count, config_overrides, weights_path,
+            seat_profiles, seat_weights,
         )
         futures.append(future)
         future_game_counts[future] = count
@@ -321,9 +350,11 @@ def main() -> None:
     parser.add_argument("--rounds-per-game", type=int, default=10)
     parser.add_argument(
         "--agent-profile",
-        choices=list(_AGENT_REGISTRY.keys()) + list(_TRAINED_AGENT_PROFILES),
-        default="rule_based",
+        choices=list(_ALL_SEAT_PROFILES),
+        default="rule_based_bot",
     )
+    parser.add_argument("--seat-profiles", type=str, default=None)
+    parser.add_argument("--seat-weights", type=str, default=None)
     parser.add_argument("--workers", type=int, default=os.cpu_count() or 4)
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--experiment-name", type=str, default="simulation")
@@ -332,12 +363,25 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
+    seat_profiles = (
+        [token.strip() for token in args.seat_profiles.split(",")] if args.seat_profiles else None
+    )
+    seat_weights: Optional[Dict[int, str]] = None
+    if args.seat_weights:
+        seat_weights = {}
+        for token in args.seat_weights.split(","):
+            pid_str, _, path = token.partition(":")
+            if path:
+                seat_weights[int(pid_str.strip())] = path.strip()
+
     launch_research(
         args.games, args.player_count, args.rounds_per_game,
         args.agent_profile, args.workers, args.output, args.seed,
         experiment_name=args.experiment_name,
         config_overrides=_RULE_PRESETS[args.config_preset],
         weights_path=args.weights_path,
+        seat_profiles=seat_profiles,
+        seat_weights=seat_weights,
     )
 
 

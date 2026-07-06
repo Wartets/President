@@ -2,8 +2,9 @@
 Module de recherche combinatoire.
 
 Le module exécute `research.run_simulation.launch_research` sur l'ensemble du produit cartésien d'un choix de profils d'agents, de nombres de
-joueurs, de présets de règles et de tailles de partie, puis agrège les métriques résumées de chaque combinaison dans un unique fichier
-manifeste, afin de faciliter la comparaison statistique de nombreuses configurations distinctes.
+joueurs, de présets de règles et de tailles de partie, ainsi que sur un ensemble optionnel de combinaisons hétérogènes de sièges, puis agrège
+les métriques résumées de chaque combinaison dans un unique fichier manifeste, afin de faciliter la comparaison statistique de nombreuses
+configurations distinctes.
 
 Le module dépend de `research.run_simulation`, de `naming` et de `polars`.
 """
@@ -14,7 +15,7 @@ import argparse
 import itertools
 import os
 import sys
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -38,10 +39,41 @@ def _parse_str_list(raw: str) -> List[str]:
     """
     Analyse une liste de chaînes séparées par des virgules.
 
-    Paramètre `raw` : chaîne de la forme `"greedy,rule_based"`.
+    Paramètre `raw` : chaîne de la forme `"greedy_bot,rule_based_bot"`.
     Retourne une liste de chaînes dépourvues d'espaces superflus. Aucun effet de bord.
     """
     return [token.strip() for token in raw.split(",") if token.strip()]
+
+
+def _parse_seat_profile_combos(raw: Optional[str]) -> Optional[List[List[str]]]:
+    """
+    Analyse une liste de combinaisons hétérogènes de sièges.
+
+    Paramètre `raw` : chaîne de la forme `"greedy_bot,rule_based_bot;torch_rl_agent,rule_based_bot,greedy_bot"`, chaque groupe séparé par
+    un point-virgule représentant une combinaison de sièges distincte, chaque profil au sein d'un groupe étant séparé par une virgule, ou
+    `None` si l'option est omise.
+    Retourne une liste de listes de profils, une par combinaison, ou `None` si `raw` est `None` ou vide. Aucun effet de bord.
+    """
+    if not raw:
+        return None
+    return [_parse_str_list(group) for group in raw.split(";") if group.strip()]
+
+
+def _parse_seat_weights(raw: Optional[str]) -> Optional[Dict[int, str]]:
+    """
+    Analyse une association entre identifiant de siège et chemin de poids entraîné.
+
+    Paramètre `raw` : chaîne de la forme `"0:weights/a.pt,2:weights/b.npy"`, ou `None` si l'option est omise.
+    Retourne un dictionnaire `{siège: chemin}`, ou `None` si `raw` est `None` ou vide. Aucun effet de bord.
+    """
+    if not raw:
+        return None
+    seat_weights: Dict[int, str] = {}
+    for token in raw.split(","):
+        pid_str, _, path = token.partition(":")
+        if path:
+            seat_weights[int(pid_str.strip())] = path.strip()
+    return seat_weights or None
 
 
 def run_grid(
@@ -53,31 +85,36 @@ def run_grid(
     games_per_combo: int,
     num_workers: int,
     base_seed: int,
+    seat_profile_combos: Optional[List[List[str]]] = None,
+    seat_weights: Optional[Dict[int, str]] = None,
 ) -> str:
     """
     Exécute l'ensemble des combinaisons du produit cartésien et agrège les résumés.
 
-    Paramètre `experiment_name` : nom de la campagne combinatoire, utilisé pour la nomenclature des
-    fichiers de chaque combinaison et du manifeste agrégé.
-    Paramètre `agent_profiles` : liste de profils d'agents à tester.
-    Paramètre `player_counts` : liste de nombres de joueurs à tester.
+    Paramètre `experiment_name` : nom de la campagne combinatoire, utilisé pour la nomenclature des fichiers de chaque combinaison et du manifeste
+    agrégé.
+    Paramètre `agent_profiles` : liste de profils d'agents uniformes à tester (appliqués à tous les sièges).
+    Paramètre `player_counts` : liste de nombres de joueurs à tester, utilisée uniquement pour les combinaisons de profils uniformes.
     Paramètre `rule_presets` : liste de noms de présets de `research.run_simulation._RULE_PRESETS`.
     Paramètre `rounds_per_game_values` : liste de nombres de manches par partie à tester.
     Paramètre `games_per_combo` : nombre de parties simulées pour chaque combinaison individuelle.
     Paramètre `num_workers` : nombre d'acteurs Ray parallèles par combinaison.
     Paramètre `base_seed` : graine de base, chaque combinaison recevant une plage de graines distincte.
-    Retourne le chemin du fichier manifeste CSV agrégé. Effet de bord : exécute une campagne de
-    simulation par combinaison (voir `launch_research`), écrit un fichier Parquet et un résumé par
-    combinaison dans `data/`, puis écrit le manifeste agrégé dans `data/`. Une combinaison dont la
-    configuration de règles est structurellement invalide (contrainte de `GameConfig.__post_init__`)
-    est ignorée avec un message d'avertissement plutôt que d'interrompre la campagne entière.
+    Paramètre `seat_profile_combos` : liste optionnelle de combinaisons hétérogènes de sièges, chacune testée contre l'ensemble de `rule_presets`
+    et `rounds_per_game_values`, le nombre de joueurs étant déduit de la taille de chaque combinaison.
+    Paramètre `seat_weights` : association entre identifiant de siège et chemin de poids entraîné, appliquée à toutes les combinaisons de
+    `seat_profile_combos` concernées par un profil entraînable.
+    Retourne le chemin du fichier manifeste CSV agrégé. Effet de bord : exécute une campagne de simulation par combinaison (voir `launch_research`),
+    écrit un fichier Parquet et un résumé par combinaison dans `data/`, puis écrit le manifeste agrégé dans `data/`. Une combinaison dont la
+    configuration de règles est structurellement invalide (contrainte de `GameConfig.__post_init__`) est ignorée avec un message d'avertissement
+    plutôt que d'interrompre la campagne entière.
     """
     all_manifest_rows: List[Dict[str, Any]] = []
     combo_index = 0
     seed_cursor = base_seed
 
-    combos = itertools.product(agent_profiles, player_counts, rule_presets, rounds_per_game_values)
-    for agent_profile, player_count, rule_preset, rounds_per_game in combos:
+    uniform_combos = itertools.product(agent_profiles, player_counts, rule_presets, rounds_per_game_values)
+    for agent_profile, player_count, rule_preset, rounds_per_game in uniform_combos:
         overrides = dict(_RULE_PRESETS.get(rule_preset, {}))
         combo_name = f"{experiment_name}_combo{combo_index}"
         try:
@@ -108,6 +145,40 @@ def run_grid(
         combo_index += 1
         seed_cursor += games_per_combo
 
+    for seat_profiles in seat_profile_combos or []:
+        for rule_preset, rounds_per_game in itertools.product(rule_presets, rounds_per_game_values):
+            overrides = dict(_RULE_PRESETS.get(rule_preset, {}))
+            combo_name = f"{experiment_name}_combo{combo_index}"
+            try:
+                summary_rows = launch_research(
+                    total_games=games_per_combo,
+                    player_count=len(seat_profiles),
+                    rounds_per_game=rounds_per_game,
+                    agent_profile=seat_profiles[0],
+                    num_workers=num_workers,
+                    output_parquet=None,
+                    base_seed=seed_cursor,
+                    experiment_name=combo_name,
+                    config_overrides=overrides,
+                    weights_path=None,
+                    seat_profiles=seat_profiles,
+                    seat_weights=seat_weights,
+                    return_summary=True,
+                )
+            except ValueError as error:
+                print(f"Combinaison ignorée ({combo_name}) : {error}")
+                combo_index += 1
+                seed_cursor += games_per_combo
+                continue
+
+            for row in summary_rows or []:
+                row["rule_preset"] = rule_preset
+                row["combo_name"] = combo_name
+                all_manifest_rows.append(row)
+
+            combo_index += 1
+            seed_cursor += games_per_combo
+
     manifest_path = naming.build_grid_manifest_filename(experiment_name)
     pl.DataFrame(all_manifest_rows).write_csv(manifest_path)
     print(f"Manifeste de recherche combinatoire écrit dans {manifest_path}")
@@ -122,13 +193,15 @@ def main() -> None:
     """
     parser = argparse.ArgumentParser(description="Recherche combinatoire multi-configurations")
     parser.add_argument("--experiment-name", type=str, default="grid")
-    parser.add_argument("--agent-profiles", type=str, default="greedy,rule_based,random,mcts")
+    parser.add_argument("--agent-profiles", type=str, default="greedy_bot,rule_based_bot,random_bot,mcts_bot")
     parser.add_argument("--player-counts", type=str, default="4,5,6")
     parser.add_argument("--rule-presets", type=str, default="base,straights,full")
     parser.add_argument("--rounds-per-game-values", type=str, default="10,50")
     parser.add_argument("--games-per-combo", type=int, default=50)
     parser.add_argument("--workers", type=int, default=os.cpu_count() or 4)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seat-profile-combos", type=str, default=None)
+    parser.add_argument("--seat-weights", type=str, default=None)
     args = parser.parse_args()
 
     run_grid(
@@ -140,6 +213,8 @@ def main() -> None:
         games_per_combo=args.games_per_combo,
         num_workers=args.workers,
         base_seed=args.seed,
+        seat_profile_combos=_parse_seat_profile_combos(args.seat_profile_combos),
+        seat_weights=_parse_seat_weights(args.seat_weights),
     )
 
 

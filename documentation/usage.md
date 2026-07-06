@@ -28,7 +28,7 @@ Le projet implémente une version paramétrable du jeu de cartes Président, ave
 * un moteur de règles pur et sans effet de bord (`core.rules_engine`, `core.math_utils`, `core.models`, `core.config`) ;
 * un moteur d'exécution de manche complète orienté événements (`engine.round.run_round`, `engine.game_runner.Game`) ;
 * un moteur d'exécution vectorisé `numpy` pour l'entraînement à haut débit, sans passer par le système d'événements (`training.fast_path.FastPathEngine`) ;
-* cinq profils d'agents prêts à l'emploi (`random`, `greedy`, `rule_based`, `mcts`, `human`) plus deux agents entraînables (`agents.rl_agent.RLAgent` à politique linéaire, `agents.torch_rl_agent.TorchRLAgent` à politique neuronale) ;
+* cinq profils d'agents prêts à l'emploi (`random_bot`, `greedy_bot`, `rule_based_bot`, `mcts_bot`, `human_agent`) plus deux agents entraînables sélectionnables au même titre via leur nom de module (`rl_agent` à politique linéaire, `torch_rl_agent` à politique neuronale), chaque nom de profil correspondant exactement au fichier `agents/<profil>.py` qui le définit ;
 * un système d'événements complet (`events.structural`, `events.transactional`, `engine.event_bus.EventBus`) permettant de journaliser, rejouer et analyser n'importe quelle partie ;
 * une couche d'analyse (`analytics.event_logger.EventLogger`, `analytics.metrics_calc`) transformant le flux d'événements en métriques exploitables (Gini, entropie, taux de passe sous-optimal, matrice de transition de rôles, etc.) ;
 * une chaîne d'entraînement distribué complète (`training.rollout_worker.RolloutWorker`, `training.replay_buffer.RedisReplayBuffer`, `training.trainer.Trainer`, `training.launch_distributed`), reposant sur `ray` pour la parallélisation et `redis` comme tampon de rejeu partagé.
@@ -93,6 +93,8 @@ Aucune saisie clavier n'est requise puisque les quatre sièges sont automatisés
 | `training.trainer` | `Trainer`, processus consommant le tampon Redis et mettant à jour une politique neuronale `torch`. |
 | `training.launch_distributed` | Point d'entrée démarrant conjointement les Rollout Workers et le Trainer. |
 | `research.run_simulation` | Lanceur de simulations massives parallélisées via Ray, avec export Parquet et résumé de métriques. |
+| `research.run_combinatory` | Recherche combinatoire sur le produit cartésien de profils d'agents, de nombres de joueurs, de présets de règles et de tailles de partie, y compris des combinaisons hétérogènes de sièges. |
+| `research.evaluate_agents` | Évaluation comparative directe de profils hétérogènes (dont des modèles entraînés) par taux de victoire et VP cumulé. |
 | `play_game.py` | Point d'entrée interactif en console. |
 
 ## 4. Jouer une partie en console (`play_game.py`)
@@ -109,13 +111,24 @@ python play_game.py --player-count 4 --seats human,greedy,greedy,greedy --rounds
 
 | Profil | Classe | Comportement |
 | :--- | :--- | :--- |
-| `human` | `agents.human_agent.HumanAgent` | Sollicite chaque décision par saisie clavier, affiche la main, la puissance à dépasser et l'état de la Révolution. |
-| `random` | `agents.random_bot.RandomBot` | Choisit uniformément une option légale parmi toutes celles disponibles (uniformes et suites). |
-| `greedy` | `agents.greedy_bot.GreedyBot` | Joue systématiquement la combinaison légale de puissance résultante minimale. |
-| `rule_based` | `agents.rule_based_bot.RuleBasedBot` | Applique des heuristiques déterministes : évite de déclencher la pénalité de sortie étendue quand une alternative existe, préserve les combinaisons de taille ≥ 4 tant que la main compte plus de 4 cartes, puis choisit la puissance minimale suffisante. |
-| `mcts` | `agents.mcts_bot.MCTSBot` | Évalue chaque option candidate par 24 rollouts simulés (paramétrable via le constructeur, `rollout_count`) joués par des `GreedyBot` de référence, et retient l'option au meilleur taux de victoire (rang de sortie ≤ 1) simulé. Coût nettement supérieur aux autres profils : à réserver aux parties courtes ou à l'analyse ponctuelle. |
+| `human_agent` | `agents.human_agent.HumanAgent` | Sollicite chaque décision par saisie clavier, affiche la main, la puissance à dépasser et l'état de la Révolution. |
+| `random_bot` | `agents.random_bot.RandomBot` | Choisit uniformément une option légale parmi toutes celles disponibles (uniformes et suites). |
+| `greedy_bot` | `agents.greedy_bot.GreedyBot` | Joue systématiquement la combinaison légale de puissance résultante minimale. |
+| `rule_based_bot` | `agents.rule_based_bot.RuleBasedBot` | Applique des heuristiques déterministes : évite de déclencher la pénalité de sortie étendue quand une alternative existe, préserve les combinaisons de taille ≥ 4 tant que la main compte plus de 4 cartes, puis choisit la puissance minimale suffisante. |
+| `mcts_bot` | `agents.mcts_bot.MCTSBot` | Évalue chaque option candidate par 24 rollouts simulés (paramétrable via le constructeur, `rollout_count`) joués par des `GreedyBot` de référence, et retient l'option au meilleur taux de victoire (rang de sortie ≤ 1) simulé. Coût nettement supérieur aux autres profils : à réserver aux parties courtes ou à l'analyse ponctuelle. |
+| `rl_agent` | `agents.rl_agent.RLAgent` | Politique linéaire entraînable. Sans poids fournis via `--weights`, joue avec des poids nuls. |
+| `torch_rl_agent` | `agents.torch_rl_agent.TorchRLAgent` | Politique neuronale entraînable (`PolicyNet`). Sans poids fournis via `--weights`, joue avec un réseau initialisé aléatoirement. |
 
-Si `--seats` est omis, le siège 0 reçoit `human` et les suivants `greedy` (comportement par défaut de `_build_seat_profiles`).
+Chaque clé de profil correspond exactement au nom du module Python définissant la classe d'agent (`agents/<clé>.py`), afin qu'ajouter un agent au registre et retrouver son implémentation soit immédiat.
+
+Si `--seats` est omis, le siège 0 reçoit `human_agent` et les suivants `greedy_bot` (comportement par défaut de `_build_seat_profiles`).
+
+Pour charger des poids entraînés sur un ou plusieurs sièges `rl_agent`/`torch_rl_agent`, utiliser `--weights`, liste de chemins séparés par des virgules alignée positionnellement sur `--seats` (une entrée vide pour tout siège n'ayant pas besoin de poids) :
+
+```bash
+python play_game.py --player-count 4 --seats torch_rl_agent,rule_based_bot,rule_based_bot,greedy_bot \
+  --weights weights/torch_rl_weights_player4_learnRate0p001_rounds10000_20260101.pt,,, --rounds 10
+```
 
 Exemple : quatre bots heuristiques s'affrontant sur 20 manches, sans aucune interaction humaine :
 
@@ -446,10 +459,19 @@ print("Longueur moyenne des plis :", trick_length_average(logger))
 
 ```bash
 python -m research.run_simulation --games 1000 --player-count 4 --rounds-per-game 10 \
-  --agent-profile rule_based --workers 4 --output research_output.parquet --seed 0
+  --agent-profile rule_based_bot --workers 4 --output research_output.parquet --seed 0
 ```
 
-`--agent-profile` accepte `greedy`, `rule_based`, `random`, `mcts`, appliqué à l'ensemble des sièges de toutes les parties simulées (`_AGENT_REGISTRY` de `research/run_simulation.py`). Le nombre de parties est réparti aussi équitablement que possible entre `--workers` acteurs Ray (`GameSimulationWorker`), chacun exécutant séquentiellement son lot avec une graine dérivée distincte (`base_seed + offset`) garantissant la reproductibilité de chaque partie individuelle.
+`--agent-profile` accepte `greedy_bot`, `rule_based_bot`, `random_bot`, `mcts_bot`, `rl_agent`, `torch_rl_agent`, appliqué à l'ensemble des sièges de toutes les parties simulées (`_AGENT_REGISTRY`/`_TRAINED_AGENT_PROFILES` de `research/run_simulation.py`), les deux derniers nécessitant `--weights-path` pour charger des poids entraînés (le siège 0 reçoit l'agent entraîné, les sièges suivants reçoivent `rule_based_bot` par défaut). Pour composer une partie hétérogène plutôt qu'un profil unique, utiliser `--seat-profiles` (liste de profils séparés par des virgules, taille `--player-count`) et, le cas échéant, `--seat-weights` (liste de couples `siège:chemin` séparés par des virgules, ciblant les sièges de profil entraînable) :
+
+```bash
+python -m research.run_simulation --games 500 --player-count 4 --rounds-per-game 10 \
+  --seat-profiles torch_rl_agent,rule_based_bot,greedy_bot,random_bot \
+  --seat-weights 0:weights/torch_rl_weights_player4_learnRate0p001_rounds10000_20260101.pt \
+  --workers 4 --output research_output.parquet --seed 0
+```
+
+Le nombre de parties est réparti aussi équitablement que possible entre `--workers` acteurs Ray (`GameSimulationWorker`), chacun exécutant séquentiellement son lot avec une graine dérivée distincte (`base_seed + offset`) garantissant la reproductibilité de chaque partie individuelle.
 
 Pendant l'exécution, un tableau de bord `rich` (`LiveMonitor`) affiche le débit de parties par seconde, l'utilisation CPU/mémoire/GPU, et un résumé de la distribution des VP observés. Une barre de progression `tqdm` suit en parallèle le nombre de lots d'acteurs Ray achevés.
 
@@ -485,8 +507,21 @@ Pour appliquer directement les fonctions de `analytics.metrics_calc` à une camp
 
 ```bash
 python -m research.run_simulation --games 20 --rounds-per-game 500 --player-count 4 \
-  --agent-profile rule_based --workers 4 --output long_run.parquet
+  --agent-profile rule_based_bot --workers 4 --output long_run.parquet
 ```
+
+### 9.4. Évaluation comparative d'agents et de modèles entraînés (`research.evaluate_agents`)
+
+`research.evaluate_agents` complète `research.run_simulation` en se concentrant sur la performance comparée de profils hétérogènes (taux de victoire, VP cumulé par profil) plutôt que sur les métriques macro/micro de `analytics.metrics_calc`. Il rejoue directement `engine.game_runner.Game.play_round` (donc via le moteur événementiel complet, toutes règles avancées comprises) plutôt que le moteur vectorisé.
+
+```bash
+python -m research.evaluate_agents --seat-profiles torch_rl_agent,rule_based_bot,greedy_bot,random_bot \
+  --seat-weights 0:weights/torch_rl_weights_player4_learnRate0p001_rounds10000_20260101.pt \
+  --games 200 --rounds-per-game 20 --config-preset full --workers 4 --seed 0 \
+  --experiment-name eval_torch_vs_baselines
+```
+
+Le fichier CSV produit (nommé selon la convention de `naming.build_research_filename`, extension `.csv`) porte une ligne par joueur et par partie, avec `profile`, `cumulative_vp` et `president_rounds` (nombre de manches terminées au rôle `ROLE_PRESIDENT`), directement exploitable pour comparer des profils fixes, des profils heuristiques, et un ou plusieurs modèles entraînés chargés par `--seat-weights`.
 
 ## 10. Le moteur vectorisé (`training.fast_path.FastPathEngine`)
 

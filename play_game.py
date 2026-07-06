@@ -6,8 +6,8 @@ humain optionnel et des sièges automatisés parmi les profils exposés par `_AG
 de `core.config.GameConfig` en options de ligne de commande et restitue, après chaque manche, un résumé des rôles et des points de victoire
 attribués.
 
-Le module dépend de `core.config`, `agents.interface`, `agents.human_agent`, `agents.random_bot`, `agents.greedy_bot`,
-`agents.rule_based_bot`, `agents.mcts_bot`, `engine.game_runner` et `engine.event_bus`.
+Le module dépend de `core.config`, `agents.interface`, `agents.human_agent`, `agents.random_bot`, `agents.greedy_bot`, `agents.rule_based_bot`,
+`agents.mcts_bot`, `engine.game_runner` et `engine.event_bus`.
 """
 
 from __future__ import annotations
@@ -31,16 +31,48 @@ from engine.event_bus import EventBus
 from engine.game_runner import Game
 
 # Association entre nom de profil de siège et fabrique d'agent instanciable via `(player_id, config)`.
+# Chaque clé correspond exactement au nom du module Python définissant la classe d'agent (`agents/<clé>.py`).
 _AGENT_REGISTRY: Dict[str, Callable[[int, GameConfig], AbstractBaseAgent]] = {
-    "human": HumanAgent,
-    "random": RandomBot,
-    "greedy": GreedyBot,
-    "rule_based": RuleBasedBot,
-    "mcts": MCTSBot,
+    "human_agent": HumanAgent,
+    "random_bot": RandomBot,
+    "greedy_bot": GreedyBot,
+    "rule_based_bot": RuleBasedBot,
+    "mcts_bot": MCTSBot,
 }
+
+# Profils entraînables nécessitant le chargement optionnel d'un fichier de poids via `--weights`.
+_TRAINED_AGENT_PROFILES = ("rl_agent", "torch_rl_agent")
 
 # Rôles valides pour l'option --strict-remainder-role, cohérents avec GameConfig.strict_remainder_role.
 _VALID_ROLES = (ROLE_PRESIDENT, ROLE_VICE_PRESIDENT, ROLE_NEUTRAL, ROLE_VICE_SCUM, ROLE_SCUM)
+
+
+def _build_seat_agent(profile: str, pid: int, config: GameConfig, weights_path: str) -> AbstractBaseAgent:
+    """
+    Construit l'agent d'un unique siège, y compris pour les profils entraînables.
+
+    Paramètre `profile` : nom de profil, clé de `_AGENT_REGISTRY` ou de `_TRAINED_AGENT_PROFILES`.
+    Paramètre `pid` : identifiant du joueur occupant le siège.
+    Paramètre `config` : configuration de la partie.
+    Paramètre `weights_path` : chemin d'un fichier de poids entraîné, chaîne vide si absent, utilisé
+    uniquement pour les profils de `_TRAINED_AGENT_PROFILES`.
+    Retourne une instance de `AbstractBaseAgent`. Aucun effet de bord hors chargement disque des poids
+    éventuels.
+    """
+    if profile == "rl_agent":
+        import numpy as np
+        from agents.rl_agent import RLAgent
+
+        weights = np.load(weights_path) if weights_path else None
+        return RLAgent(pid, config, weights=weights, epsilon=0.0)
+    if profile == "torch_rl_agent":
+        from agents.torch_rl_agent import TorchRLAgent
+
+        trained = TorchRLAgent(player_id=pid, config=config, epsilon=0.0)
+        if weights_path:
+            trained.load_weights(weights_path)
+        return trained
+    return _AGENT_REGISTRY[profile](pid, config)
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -54,6 +86,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--seats", type=str, default=None)
     parser.add_argument("--rounds", type=int, default=5)
+    parser.add_argument("--weights", type=str, default=None)
 
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--player-count", type=int, default=4)
@@ -158,22 +191,23 @@ def _build_seat_profiles(seats_arg: str, player_count: int) -> list:
 
     Paramètre `seats_arg` : valeur brute de `--seats`, chaîne de profils séparés par des virgules, ou `None` si l'option est omise.
     Paramètre `player_count` : nombre de joueurs $N$, utilisé pour valider la taille de la liste et pour construire le profil par défaut.
-    Retourne une liste de chaînes de profils, de taille `player_count`. Si `seats_arg` est `None`, le siège 0 reçoit le profil `'human'` et
-    les sièges suivants reçoivent le profil `'greedy'`. Lève `ValueError` si un profil est inconnu de `_AGENT_REGISTRY` ou si le nombre de
-    profils fournis diffère de `player_count`. Aucun effet de bord.
+    Retourne une liste de chaînes de profils, de taille `player_count`. Si `seats_arg` est `None`, le siège 0 reçoit le profil `'human_agent'`
+    et les sièges suivants reçoivent le profil `'greedy_bot'`. Lève `ValueError` si un profil est inconnu de `_AGENT_REGISTRY` et de
+    `_TRAINED_AGENT_PROFILES`, ou si le nombre de profils fournis diffère de `player_count`. Aucun effet de bord.
     """
     if seats_arg is None:
-        return ["human"] + ["greedy"] * (player_count - 1)
+        return ["human_agent"] + ["greedy_bot"] * (player_count - 1)
 
     profiles = [token.strip() for token in seats_arg.split(",")]
     if len(profiles) != player_count:
         raise ValueError(
             f"--seats doit contenir exactement {player_count} profil(s), {len(profiles)} fourni(s)."
         )
+    valid_profiles = set(_AGENT_REGISTRY) | set(_TRAINED_AGENT_PROFILES)
     for profile in profiles:
-        if profile not in _AGENT_REGISTRY:
+        if profile not in valid_profiles:
             raise ValueError(
-                f"Profil de siège inconnu : '{profile}'. Profils disponibles : {', '.join(_AGENT_REGISTRY)}."
+                f"Profil de siège inconnu : '{profile}'. Profils disponibles : {', '.join(sorted(valid_profiles))}."
             )
     return profiles
 
@@ -205,9 +239,13 @@ def main() -> None:
 
     config = _build_config(args)
     seat_profiles = _build_seat_profiles(args.seats, config.player_count)
+    seat_weights_list = args.weights.split(",") if args.weights else []
 
     agents: Dict[int, AbstractBaseAgent] = {
-        pid: _AGENT_REGISTRY[profile](pid, config)
+        pid: _build_seat_agent(
+            profile, pid, config,
+            seat_weights_list[pid].strip() if pid < len(seat_weights_list) else "",
+        )
         for pid, profile in enumerate(seat_profiles)
     }
 
