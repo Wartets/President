@@ -15,7 +15,7 @@ import argparse
 import os
 import sys
 import time
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Callable, Dict, List, Optional, cast
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -102,6 +102,8 @@ def launch_evaluation(
     config_overrides: Optional[Dict[str, Any]] = None,
     seat_weights: Optional[Dict[int, str]] = None,
     output_csv: Optional[str] = None,
+    shutdown_ray: bool = True,
+    stop_check: Optional[Callable[[], bool]] = None,
 ) -> str:
     """
     Orchestre une campagne d'évaluation comparative répartie sur plusieurs acteurs Ray.
@@ -146,8 +148,21 @@ def launch_evaluation(
 
     start = time.time()
     all_rows: List[Dict[str, Any]] = []
-    for future in tqdm(futures, desc="Évaluation", unit="lot"):
-        all_rows.extend(ray.get(future))
+    pending = list(futures)
+    with tqdm(total=len(futures), desc="Évaluation", unit="lot") as bar:
+        while pending:
+            if stop_check is not None and stop_check():
+                for leftover in pending:
+                    try:
+                        ray.cancel(leftover, force=False)
+                    except Exception:
+                        pass
+                break
+            done, pending = ray.wait(pending, num_returns=1, timeout=1.0)
+            if not done:
+                continue
+            all_rows.extend(ray.get(done[0]))
+            bar.update(1)
     elapsed = time.time() - start
 
     if output_csv is None:
@@ -166,7 +181,8 @@ def launch_evaluation(
     table.add_row("Fichier CSV", output_csv)
     console.print(table)
 
-    ray.shutdown()
+    if shutdown_ray:
+        ray.shutdown()
     return output_csv
 
 
@@ -224,6 +240,9 @@ def main() -> None:
             if path:
                 seat_weights[int(pid_str.strip())] = path.strip()
 
+    from checkpoint_utils import GracefulKiller
+
+    killer = GracefulKiller()
     launch_evaluation(
         total_games=args.games,
         seat_profiles=seat_profiles,
@@ -234,6 +253,7 @@ def main() -> None:
         config_overrides=_RULE_PRESETS[args.config_preset],
         seat_weights=seat_weights,
         output_csv=args.output,
+        stop_check=lambda: killer.should_stop,
     )
 
 

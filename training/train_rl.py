@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import argparse
 import copy
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from rich.console import Console
@@ -117,6 +117,8 @@ def train(
     opponent_pool: str = "mixed",
     initial_weights: Optional[np.ndarray] = None,
     initial_epsilon: float = 0.3,
+    stop_check: Optional[Callable[[], bool]] = None,
+    on_round: Optional[Callable[[int], None]] = None,
 ) -> Tuple[RLAgent, List[float]]:
     """
     Entraîne un `RLAgent` par ajustement de gradient de politique sur un nombre fixé de manches.
@@ -127,8 +129,13 @@ def train(
     Paramètre `opponent_pool` : nature des adversaires simulés, chaîne parmi `'greedy'`, `'rule_based'`, `'mixed'`.
     Paramètre `initial_weights` : poids de politique de départ, utilisés pour reprendre un entraînement antérieur ; poids nuls si `None`.
     Paramètre `initial_epsilon` : taux d'exploration de départ.
-    Retourne un tuple `(trainee, running_vp)` : l'instance de `RLAgent` entraînée portant les poids ajustés, et la liste des points de victoire
-    obtenus manche après manche. Effet de bord : affiche un tableau de bord `rich` de progression et met à jour `trainee.weights`/`trainee.epsilon`
+    Paramètre `stop_check` : fonction sans argument consultée avant chaque manche ; si elle retourne vrai, l'entraînement s'arrête
+    proprement avant la manche suivante et retourne l'état accumulé jusque-là, permettant une reprise ultérieure sans perte de travail.
+    Paramètre `on_round` : fonction optionnelle invoquée après chaque manche avec l'index de la manche, utile pour piloter un affichage
+    de progression externe sans dupliquer la barre `tqdm` interne.
+    Retourne un tuple `(trainee, running_vp)` : l'instance de `RLAgent` entraînée portant les poids ajustés, et la liste des points de
+    victoire obtenus manche après manche (de taille potentiellement inférieure à `total_rounds` si `stop_check` a déclenché un arrêt
+    anticipé). Effet de bord : affiche un tableau de bord `rich` de progression et met à jour `trainee.weights`/`trainee.epsilon`
     à chaque manche.
     """
     console = Console()
@@ -143,7 +150,11 @@ def train(
     running_vp: List[float] = []
     roles = None
 
-    for round_index in tqdm(range(total_rounds), desc="Entraînement RLAgent", unit="manche"):
+    progress_bar = tqdm(range(total_rounds), desc="Entraînement RLAgent", unit="manche")
+    for round_index in progress_bar:
+        if stop_check is not None and stop_check():
+            progress_bar.close()
+            break
         opponents = {
             pid + 1: opponent_classes[pid](pid + 1, config)
             for pid in range(config.player_count - 1)
@@ -153,6 +164,8 @@ def train(
             config, trainee, opponents, tracker, round_index, roles, "training-game"
         )
         running_vp.append(vp)
+        if on_round is not None:
+            on_round(round_index)
 
         if tracker:
             baseline = float(np.mean([r[2] for r in tracker]))
@@ -207,12 +220,19 @@ def main() -> None:
             rounds_already_trained = int(metadata.get("rounds_trained", 0))
         print(f"Reprise de l'entraînement depuis {args.resume} ({rounds_already_trained} manches déjà jouées).")
 
+    from checkpoint_utils import GracefulKiller
+
+    killer = GracefulKiller()
+
     trainee, running_vp = train(
         config, args.rounds, args.learning_rate, args.opponent_pool,
         initial_weights=initial_weights,
+        stop_check=lambda: killer.should_stop,
     )
 
-    total_rounds_trained = rounds_already_trained + args.rounds
+    total_rounds_trained = rounds_already_trained + len(running_vp)
+    if len(running_vp) < args.rounds:
+        print(f"Entraînement interrompu proprement après {len(running_vp)}/{args.rounds} manches ; relancer avec --resume pour continuer.")
 
     output_path = args.output or naming.build_weights_filename(
         model_name=args.model_name,

@@ -19,7 +19,7 @@ import argparse
 import os
 import shutil
 import time
-from typing import Any, Dict, List, Optional, Type, cast
+from typing import Any, Callable, Dict, List, Optional, Type, cast
 
 import polars as pl
 import ray
@@ -271,6 +271,8 @@ def launch_research(
     seat_weights: Optional[Dict[int, str]] = None,
     return_summary: bool = False,
     progress_chunk_size: int = 5,
+    shutdown_ray: bool = True,
+    stop_check: Optional[Callable[[], bool]] = None,
 ) -> Optional[List[Dict[str, Any]]]:
     """
     Orchestre le lancement d'une campagne de simulation massive et l'agrégation des métriques résultantes.
@@ -296,6 +298,11 @@ def launch_research(
     garantit des mises à jour de progression fréquentes même pour un profil d'agent lent (ex : `mcts_bot`), au prix d'un léger surcoût de
     planification Ray ; une valeur élevée réduit ce surcoût mais peut laisser la progression apparente figée pendant toute la durée d'un
     lot si le profil simulé est particulièrement coûteux.
+    Paramètre `shutdown_ray` : si faux, ne ferme pas le cluster Ray à la fin de l'appel, permettant d'enchaîner plusieurs campagnes
+    successives (par exemple depuis `research.run_pipeline`) sans reconstruire un cluster à chaque fois.
+    Paramètre `stop_check` : fonction sans argument consultée régulièrement pendant l'attente des résultats ; si elle retourne vrai, les
+    tâches Ray encore en attente sont annulées au mieux et la fonction retourne immédiatement avec les résultats déjà collectés, sans
+    perdre le travail déjà accompli.
     Retourne la liste des résumés de métriques par partie si `return_summary` est vrai, sinon `None`. Effet de bord : initialise un cluster Ray
     local, distribue les parties entre les acteurs par petits lots successifs, écrit le journal agrégé et le résumé de métriques dans `data/`,
     et affiche un résumé via `rich`.
@@ -330,16 +337,29 @@ def launch_research(
     start = time.time()
     all_records: List[dict] = []
     all_summaries: List[Dict[str, Any]] = []
+    interrupted = False
     with tqdm(total=len(futures), desc="Simulating", unit="batch", mininterval=0.5) as bar, LiveMonitor(console=console) as monitor:
         pending = list(futures)
         while pending:
-            done, pending = ray.wait(pending, num_returns=1)
+            if stop_check is not None and stop_check():
+                interrupted = True
+                for leftover in pending:
+                    try:
+                        ray.cancel(leftover, force=False)
+                    except Exception:
+                        pass
+                break
+            done, pending = ray.wait(pending, num_returns=1, timeout=1.0)
+            if not done:
+                continue
             batch_result = ray.get(done[0])
             all_records.extend(batch_result["records"])
             all_summaries.extend(batch_result["summaries"])
             monitor.record_games(future_game_counts.get(done[0], 0))
             bar.update(1)
     elapsed = time.time() - start
+    if interrupted:
+        console.print("[bold dark_orange]Arrêt demandé : campagne interrompue proprement, résultats partiels conservés.[/bold dark_orange]")
 
     if output_parquet is None:
         output_parquet = naming.build_research_filename(
@@ -373,7 +393,8 @@ def launch_research(
     table.add_row("Fichier de résumé", summary_path if all_summaries else "non écrit (aucun résumé)")
     console.print(table)
 
-    ray.shutdown()
+    if shutdown_ray:
+        ray.shutdown()
 
     if return_summary:
         return all_summaries
@@ -455,6 +476,9 @@ def main() -> None:
         print(f"  Travailleurs Ray : {args.workers}")
         return
 
+    from checkpoint_utils import GracefulKiller
+
+    killer = GracefulKiller()
     launch_research(
         args.games, args.player_count, args.rounds_per_game,
         args.agent_profile, args.workers, args.output, args.seed,
@@ -463,6 +487,7 @@ def main() -> None:
         weights_path=args.weights_path,
         seat_profiles=seat_profiles,
         seat_weights=seat_weights,
+        stop_check=lambda: killer.should_stop,
     )
 
 

@@ -95,7 +95,7 @@ lorsque la main est déjà favorable ; l'invocation ajoute la conservation de ce
 ## 14. Corrélation poids de la taxe d'échange / VP du destinataire (`tax_weight_vp_regression.html`)
 
 Attendu : corrélation négative (recevoir des cartes de poids élevé, donc de puissance élevée en amont, désavantage le destinataire déjà
-`ROLE_SCUM`/`ROLE_VICE_SCUM` sous cette mécanique redistributive) — en pratique la corrélation attendue dépend du rôle du destinataire
+`ROLE_SCUM`/`ROLE_VICE_SCUM` sous cette mécanique redistributive), en pratique la corrélation attendue dépend du rôle du destinataire
 (`ROLE_PRESIDENT` reçoit des cartes fortes du `ROLE_SCUM`, ce qui est plutôt favorable). Test : corrélation de signe cohérent avec le rôle
 receveur majoritaire de l'échantillon (à documenter au cas par cas plutôt qu'un signe universel).
 

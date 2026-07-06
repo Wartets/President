@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import io
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import torch
@@ -142,24 +142,34 @@ class Trainer:
         )
         return weights_path
 
-    def run(self, batch_size: int, total_steps: int) -> None:
+    def run(self, batch_size: int, total_steps: int, stop_check: Optional[Callable[[], bool]] = None) -> None:
         """
         Exécute la boucle d'apprentissage complète.
 
         Paramètre `batch_size` : taille de lot utilisée à chaque étape de gradient.
         Paramètre `total_steps` : nombre total d'étapes d'apprentissage à exécuter lors de cet appel, en sus des étapes déjà effectuées lors
         d'une éventuelle reprise.
-        Retourne `None`. Effet de bord : attend que le tampon soit suffisamment peuplé, exécute `total_steps` appels à `train_step`, republie
-        les poids toutes les `_PUBLISH_INTERVAL` étapes, sauvegarde un instantané local nommé dans `weights/`, et affiche un tableau de
-        bord `rich` de progression.
+        Paramètre `stop_check` : fonction sans argument consultée avant chaque étape de gradient ; si elle retourne vrai, la boucle
+        s'arrête proprement, republie les derniers poids et sauvegarde un instantané final avant de rendre la main, permettant une reprise
+        ultérieure sans perte de travail via `--resume-weights`.
+        Retourne `None`. Effet de bord : attend que le tampon soit suffisamment peuplé, exécute jusqu'à `total_steps` appels à
+        `train_step`, republie les poids toutes les `_PUBLISH_INTERVAL` étapes, sauvegarde un instantané local nommé dans `weights/`, et affiche
+        un tableau de bord `rich` de progression.
         """
         console = Console()
         while self.buffer.size() < batch_size:
+            if stop_check is not None and stop_check():
+                print("Arrêt demandé pendant l'attente du remplissage du tampon, aucune étape exécutée.")
+                return
             time.sleep(1.0)
 
+        steps_executed = 0
         for step in range(total_steps):
+            if stop_check is not None and stop_check():
+                break
             loss = self.train_step(batch_size)
-            steps_completed = self.steps_already_trained + step + 1
+            steps_executed = step + 1
+            steps_completed = self.steps_already_trained + steps_executed
             if steps_completed % _PUBLISH_INTERVAL == 0:
                 self._publish_weights()
                 checkpoint_path = self._save_checkpoint(steps_completed)
@@ -173,8 +183,8 @@ class Trainer:
                 console.print(table)
 
         self._publish_weights()
-        final_path = self._save_checkpoint(self.steps_already_trained + total_steps)
-        print(f"Poids finaux sauvegardés dans {final_path}")
+        final_path = self._save_checkpoint(self.steps_already_trained + steps_executed)
+        print(f"Poids finaux sauvegardés dans {final_path} ({steps_executed}/{total_steps} étapes exécutées lors de cet appel).")
 
 
 def main() -> None:
@@ -204,7 +214,15 @@ def main() -> None:
         player_count=args.player_count,
         model_name=args.model_name,
     )
-    trainer.run(args.batch_size, args.total_steps)
+
+    import sys as _sys
+    import os as _os
+
+    _sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
+    from checkpoint_utils import GracefulKiller
+
+    killer = GracefulKiller()
+    trainer.run(args.batch_size, args.total_steps, stop_check=lambda: killer.should_stop)
 
 
 if __name__ == "__main__":
