@@ -1,7 +1,7 @@
 # Résultats attendus
 
 Ce document définit, pour chaque graphique produit par `research/generate_graphs.py` (équivalent exécutable de `graphs.ipynb`), la forme
-statistique attendue du résultat sous une implémentation correcte des règles décrites dans `rules.md`. Il sert de référence pour construire
+statistique attendue du résultat sous une implémentation correcte des règles décrites dans [`rules.md`](rules.md). Il sert de référence pour construire
 des tests de validation (assertions sur bornes, signes de corrélation, ordres de grandeur) plutôt qu'une simple inspection visuelle.
 
 ## 1. Distribution des VP par rang de sortie (`vp_by_rank_violin.png`)
