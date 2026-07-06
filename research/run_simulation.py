@@ -8,8 +8,12 @@ module agrège ensuite un sous-ensemble des métriques de `analytics.metrics_cal
 Le module dépend de `ray`, `core.config`, `agents.greedy_bot`, `agents.rule_based_bot`, `agents.random_bot`, `agents.mcts_bot`,
 `engine.game_runner`, `analytics.event_logger`, `analytics.metrics_calc` et `rich`/`tqdm` pour le suivi de progression.
 """
-
 from __future__ import annotations
+
+import os
+import sys
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import argparse
 import os
