@@ -15,9 +15,15 @@ from __future__ import annotations
 import argparse
 from typing import Callable, Dict
 
+from rich.console import Console
+
+import console_theme
+
+from agents.adaptive_bot import AdaptiveBot
 from agents.greedy_bot import GreedyBot
 from agents.human_agent import HumanAgent
 from agents.interface import AbstractBaseAgent
+from agents.lookahead_bot import LookaheadBot
 from agents.mcts_bot import MCTSBot
 from agents.random_bot import RandomBot
 from agents.rule_based_bot import RuleBasedBot
@@ -37,6 +43,8 @@ _AGENT_REGISTRY: Dict[str, Callable[[int, GameConfig], AbstractBaseAgent]] = {
     "random_bot": RandomBot,
     "greedy_bot": GreedyBot,
     "rule_based_bot": RuleBasedBot,
+    "lookahead_bot": LookaheadBot,
+    "adaptive_bot": AdaptiveBot,
     "mcts_bot": MCTSBot,
 }
 
@@ -217,6 +225,9 @@ def _build_seat_profiles(seats_arg: str, player_count: int) -> list:
     return profiles
 
 
+_summary_console = Console()
+
+
 def _print_round_summary(round_index: int, vp_by_player: Dict[int, float], roles_by_player: Dict[int, str]) -> None:
     """
     Affiche le résumé d'une manche achevée.
@@ -224,12 +235,16 @@ def _print_round_summary(round_index: int, vp_by_player: Dict[int, float], roles
     Paramètre `round_index` : index $m$ de la manche qui vient de se terminer.
     Paramètre `vp_by_player` : association entre identifiant de joueur et point de victoire attribué pour la manche.
     Paramètre `roles_by_player` : association entre identifiant de joueur et rôle attribué pour la manche suivante.
-    Retourne `None`. Effet de bord : écrit sur la sortie standard.
+    Retourne `None`. Effet de bord : écrit sur la sortie standard, avec une identification colorée par joueur et par rôle.
     """
-    print(f"\n=== Fin de la manche {round_index} ===")
+    _summary_console.print(f"\n[bold]=== Fin de la manche {round_index} ===[/bold]")
     for pid in sorted(vp_by_player):
         role = roles_by_player.get(pid, "?")
-        print(f"  Joueur {pid} : VP = {vp_by_player[pid]:+.2f}, rôle pour la manche suivante = {role}")
+        role_display = console_theme.role_tag(role) if role != "?" else "?"
+        _summary_console.print(
+            f"  {console_theme.player_tag(pid)} : VP = {vp_by_player[pid]:+.2f}, "
+            f"rôle pour la manche suivante = {role_display}"
+        )
 
 
 def main() -> None:
@@ -281,9 +296,9 @@ def main() -> None:
         roles_by_player = game.roles or {}
         _print_round_summary(round_index, vp_by_player, roles_by_player)
 
-    print("\n=== Total cumulé sur la partie ===")
+    _summary_console.print(f"\n[{console_theme.STYLE_SUCCESS}]=== Total cumulé sur la partie ===[/{console_theme.STYLE_SUCCESS}]")
     for pid in sorted(game.cumulative_vp):
-        print(f"  Joueur {pid} : VP total = {game.cumulative_vp[pid]:+.2f}")
+        _summary_console.print(f"  {console_theme.player_tag(pid)} : VP total = {game.cumulative_vp[pid]:+.2f}")
 
 
 if __name__ == "__main__":

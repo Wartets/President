@@ -126,6 +126,25 @@ def _load_training_histories(pattern: str = "*history.csv") -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
+def _load_learning_rate_sweep(path: str = os.path.join(DATA_DIR, "learning_rate_sweep.csv")) -> pd.DataFrame:
+    """Charge le résultat du balayage de taux d'apprentissage, vide si le fichier est absent."""
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    return pd.read_csv(path)
+
+
+def _plot_learning_rate_sweep(sweep_df: pd.DataFrame) -> None:
+    """Performance finale d'entraînement par taux d'apprentissage testé (boîtes à moustaches)."""
+    if sweep_df.empty or "learning_rate" not in sweep_df.columns or "final_vp_mean" not in sweep_df.columns:
+        return
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ordered = sweep_df.sort_values("learning_rate")
+    sns.boxplot(data=ordered, x="learning_rate", y="final_vp_mean", ax=ax)
+    ax.set_xlabel("Taux d'apprentissage")
+    ax.set_ylabel("VP moyen final (fin d'entraînement)")
+    _savefig(fig, "learning_rate_final_performance_boxplot.png")
+
+
 def _load_evaluation_csvs(pattern: str = "*.csv") -> pd.DataFrame:
     """Charge et concatène les fichiers d'évaluation comparative (`research.evaluate_agent`), en excluant résumés et manifestes."""
     paths = sorted(glob.glob(os.path.join(DATA_DIR, pattern)))
@@ -483,6 +502,7 @@ def generate_all() -> None:
     manifest_df = _load_grid_manifests()
     history_df = _load_training_histories()
     evaluation_df = _load_evaluation_csvs()
+    lr_sweep_df = _load_learning_rate_sweep()
 
     _plot_vp_by_rank_violin(finished_df)
     _plot_win_rate_by_player(finished_df)
@@ -502,6 +522,7 @@ def generate_all() -> None:
     _plot_evaluation_violin(evaluation_df)
     _plot_evaluation_president_rate(evaluation_df)
     _plot_combo_power_bubble(action_played_df)
+    _plot_learning_rate_sweep(lr_sweep_df)
 
     print(f"Graphiques générés dans {FIGURE_DIR}/ (données manquantes ignorées silencieusement graphique par graphique).")
 

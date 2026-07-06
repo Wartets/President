@@ -20,6 +20,8 @@ from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 
+import console_theme
+
 try:
     import pynvml
     _NVML_AVAILABLE = True
@@ -141,17 +143,30 @@ class LiveMonitor:
         elapsed = max(time.time() - (self._start_time or time.time()), 1e-9)
         fps = self._games_completed / elapsed
 
-        table = Table(title="Campagne de simulation, suivi en temps réel")
+        cpu_percent = psutil.cpu_percent()
+        mem_percent = psutil.virtual_memory().percent
+
+        table = Table(title=f"[{console_theme.STYLE_CAMPAIGN}]Campagne de simulation, suivi en temps réel[/{console_theme.STYLE_CAMPAIGN}]")
         table.add_column("Métrique")
         table.add_column("Valeur")
-        table.add_row("Parties complétées", str(self._games_completed))
+        table.add_row("Parties complétées", f"[bold]{self._games_completed}[/bold]")
         table.add_row("Parties / seconde", f"{fps:.2f}")
         table.add_row("Durée écoulée (s)", f"{elapsed:.1f}")
-        table.add_row("Utilisation CPU (%)", f"{psutil.cpu_percent():.1f}")
-        table.add_row("Mémoire utilisée (%)", f"{psutil.virtual_memory().percent:.1f}")
+        table.add_row(
+            "Utilisation CPU (%)",
+            f"[{console_theme.usage_style(cpu_percent)}]{cpu_percent:.1f}[/{console_theme.usage_style(cpu_percent)}]",
+        )
+        table.add_row(
+            "Mémoire utilisée (%)",
+            f"[{console_theme.usage_style(mem_percent)}]{mem_percent:.1f}[/{console_theme.usage_style(mem_percent)}]",
+        )
 
         gpu_usage = self._gpu_usage_percent()
-        table.add_row("Utilisation GPU (%)", f"{gpu_usage:.1f}" if gpu_usage is not None else "indisponible")
+        if gpu_usage is not None:
+            gpu_style = console_theme.usage_style(gpu_usage)
+            table.add_row("Utilisation GPU (%)", f"[{gpu_style}]{gpu_usage:.1f}[/{gpu_style}]")
+        else:
+            table.add_row("Utilisation GPU (%)", f"[{console_theme.STYLE_MUTED}]indisponible[/{console_theme.STYLE_MUTED}]")
 
         if self._reward_samples:
             mean_reward = sum(self._reward_samples) / len(self._reward_samples)

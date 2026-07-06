@@ -1,17 +1,19 @@
 """
 Module de l'agent Monte-Carlo par simulation de rollouts.
 
-Le module définit `MCTSBot`, une implémentation de `AbstractBaseAgent` évaluant chaque option légale par un ensemble de simulations de fin
-de manche jouées par des agents de référence déterministes, et sélectionnant l'option dont le taux de victoire moyen estimé est le plus
-élevé. L'agent ne modifie jamais l'état réel de la partie ; toute simulation opère sur une copie profonde de la vue matérialisée courante.
+Le module définit `MCTSBot`, une implémentation de `AbstractBaseAgent` évaluant un sous-ensemble borné d'options légales par un budget total
+de rollouts réparti entre elles, chaque rollout jouant la fin de manche avec des agents de référence déterministes pour les adversaires, et
+sélectionnant l'option dont le score moyen estimé est le plus élevé. L'agent ne modifie jamais l'état réel de la partie : toute simulation
+opère sur un clone léger de la vue matérialisée courante, obtenu sans recopie profonde des objets immuables (`Card`, `Hand`), ceux-ci n'étant
+jamais mutés en place ailleurs dans le moteur.
 
 Le module dépend de `agents.interface`, `agents.greedy_bot`, `core.models`, `core.config`, `core.rules_engine`, `engine.state` et de la
-bibliothèque standard `copy` et `random`.
+bibliothèque standard `dataclasses` et `random`.
 """
 
 from __future__ import annotations
 
-import copy
+import dataclasses
 import random
 from typing import Dict, List, Optional, Tuple
 
@@ -20,22 +22,32 @@ from agents.interface import AbstractBaseAgent
 from core.config import GameConfig
 from core.math_utils import f_power
 from core.models import Action, ActionType, Card, Hand
-from core.rules_engine import generate_sequence_plays, generate_uniform_plays
+from core.rules_engine import (
+    combination_power, generate_sequence_plays, generate_uniform_plays,
+    is_valid_sequence_combination, is_valid_uniform_combination,
+)
 from engine.state import GameState
 
-# Nombre de rollouts simulés par option candidate évaluée par l'agent.
-_DEFAULT_ROLLOUT_COUNT = 24
+# Nombre total de rollouts répartis entre toutes les options candidates d'une décision.
+_DEFAULT_ROLLOUT_BUDGET = 160
+
+# Nombre minimal de rollouts garantis par option candidate, même si le budget global est faible.
+_MIN_ROLLOUTS_PER_OPTION = 6
 
 # Nombre maximal de demi-coups simulés par rollout avant arrêt forcé.
-_MAX_ROLLOUT_STEPS = 400
+_MAX_ROLLOUT_STEPS = 250
+
+# Nombre maximal d'options distinctes réellement évaluées par rollout ; au-delà, seules des
+# options représentatives sélectionnées par `_prefilter_candidates` sont conservées.
+_MAX_CANDIDATES_EVALUATED = 8
 
 
 class MCTSBot(AbstractBaseAgent):
     """
-    Agent sélectionnant l'option légale de taux de victoire simulé maximal.
+    Agent sélectionnant l'option légale de score simulé moyen maximal, sous budget de rollouts borné.
 
     Champ `config` : configuration de la partie.
-    Champ `rollout_count` : nombre de simulations de rollout effectuées par option candidate, entier strictement positif.
+    Champ `rollout_budget` : nombre total de rollouts répartis entre les options candidates d'une décision, entier strictement positif.
     Champ `_rng` : générateur pseudo-aléatoire dédié à l'agent et à ses rollouts internes.
     """
 
@@ -43,11 +55,15 @@ class MCTSBot(AbstractBaseAgent):
         self,
         player_id: int,
         config: GameConfig,
-        rollout_count: int = _DEFAULT_ROLLOUT_COUNT,
+        rollout_count: Optional[int] = None,
+        rollout_budget: int = _DEFAULT_ROLLOUT_BUDGET,
     ) -> None:
         super().__init__(player_id)
         self.config = config
-        self.rollout_count = rollout_count
+        # `rollout_count`, conservé pour compatibilité ascendante avec les constructions
+        # existantes, fixe directement le budget total (par équivalence approximative avec
+        # l'ancien nombre de rollouts par option) plutôt que le nombre par option lui-même.
+        self.rollout_budget = rollout_count * _MAX_CANDIDATES_EVALUATED if rollout_count else rollout_budget
         self._rng = random.Random(f"{config.random_seed}:{player_id}:mcts")
         self._rollout_agents: Dict[int, AbstractBaseAgent] = {}
 
@@ -85,23 +101,89 @@ class MCTSBot(AbstractBaseAgent):
             self._rollout_agents[pid] = GreedyBot(pid, self.config)
         return self._rollout_agents[pid]
 
-    def _simulate_rollout(self, initial_state: GameState, first_action: Action) -> bool:
+    def _resulting_power(self, option: Tuple[Tuple[Card, ...], Optional[int]], e_rev: bool) -> int:
+        """
+        Calcule la puissance résultante approchée d'une option de jeu.
+
+        Paramètre `option` : tuple `(cards, declared_power)` candidat.
+        Paramètre `e_rev` : état de révolution courant.
+        Retourne un entier, puissance de la première carte non Joker de la combinaison, ou `declared_power` si la combinaison n'est composée
+        que de Jokers. Aucun effet de bord.
+        """
+        cards, declared = option
+        non_jokers = [c for c in cards if not c.is_joker()]
+        if non_jokers:
+            return f_power(non_jokers[0], e_rev)
+        return declared if declared is not None else 0
+
+    def _prefilter_candidates(
+        self, options: List[Tuple[Tuple[Card, ...], Optional[int]]], hand_size: int, e_rev: bool,
+    ) -> List[Tuple[Tuple[Card, ...], Optional[int]]]:
+        """
+        Réduit l'ensemble d'options réellement évaluées par rollout à un sous-ensemble borné et représentatif.
+
+        Paramètre `options` : ensemble complet des options légales disponibles.
+        Paramètre `hand_size` : taille de la main avant la pose.
+        Paramètre `e_rev` : état de révolution courant.
+        Retourne une liste d'options de taille au plus `_MAX_CANDIDATES_EVALUATED`, incluant systématiquement toute option vidant intégralement
+        la main (sortie immédiate), puis un échantillon des options restantes réparti sur l'éventail des puissances résultantes croissantes
+        plutôt que limité aux seules plus faibles, afin de conserver une diversité représentative malgré la troncature. Aucun effet de bord.
+        """
+        if len(options) <= _MAX_CANDIDATES_EVALUATED:
+            return options
+
+        finishing = [opt for opt in options if len(opt[0]) == hand_size]
+        others = sorted(
+            (opt for opt in options if len(opt[0]) != hand_size),
+            key=lambda opt: self._resulting_power(opt, e_rev),
+        )
+        remaining_slots = max(0, _MAX_CANDIDATES_EVALUATED - len(finishing))
+        if remaining_slots <= 0 or not others:
+            selected_others: List[Tuple[Tuple[Card, ...], Optional[int]]] = []
+        elif len(others) <= remaining_slots:
+            selected_others = others
+        else:
+            step = len(others) / remaining_slots
+            selected_others = [others[int(i * step)] for i in range(remaining_slots)]
+        return finishing + selected_others
+
+    @staticmethod
+    def _clone_state(state: GameState) -> GameState:
+        """
+        Clone une vue matérialisée pour une simulation isolée, sans recopie profonde inutile.
+
+        Paramètre `state` : vue matérialisée source.
+        Retourne une nouvelle instance de `GameState` dont les conteneurs mutables (dictionnaires de mains, d'éligibilité et de sortie,
+        liste ordonnée de sortie, état de pli) sont dupliqués, tandis que les objets immuables qu'ils référencent (`Hand`, `Card`) restent
+        partagés en toute sécurité entre l'original et le clone, ceux-ci n'étant jamais mutés en place. Aucun effet de bord sur `state`.
+        """
+        return GameState(
+            hands=dict(state.hands),
+            is_finished=dict(state.is_finished),
+            is_eligible=dict(state.is_eligible),
+            finish_order=list(state.finish_order),
+            e_rev=state.e_rev,
+            l_rev=state.l_rev,
+            is_equal_forced=state.is_equal_forced,
+            current_player_id=state.current_player_id,
+            round_index=state.round_index,
+            trick=dataclasses.replace(state.trick),
+            roles=dict(state.roles),
+        )
+
+    def _simulate_rollout(self, initial_state: GameState, first_action: Action) -> float:
         """
         Simule la fin d'une manche à partir d'un état donné et d'une première action imposée.
 
-        Paramètre `initial_state` : vue matérialisée de l'état courant, copiée avant simulation.
+        Paramètre `initial_state` : vue matérialisée de l'état courant, clonée avant simulation via `_clone_state`.
         Paramètre `first_action` : action imposée au joueur courant pour le premier demi-coup simulé.
-        Retourne un booléen, vrai si `self.player_id` figure dans les deux premiers rangs de sortie simulés (`ROLE_PRESIDENT` ou
-        `ROLE_VICE_PRESIDENT`) à l'issue du rollout, ou si la limite `_MAX_ROLLOUT_STEPS` est atteinte sans que `self.player_id` ait terminé
-        en position défavorable. Effet de bord : consomme l'état interne de `_rng`. N'affecte jamais l'état réel de la partie.
+        Retourne un score continu, domaine $[0, 1]$, égal à $1 - \\text{rang}/(N-1)$ pour le rang de sortie simulé de `self.player_id`
+        (rang $N-1$ par défaut si la limite `_MAX_ROLLOUT_STEPS` est atteinte sans sortie). Pour les demi-coups suivants de `self.player_id`
+        au sein du même rollout, une politique gloutonne déterministe est utilisée plutôt qu'un tirage uniforme, réduisant la variance de
+        l'estimation à budget de rollouts égal. Effet de bord : consomme l'état interne de `_rng` uniquement via les agents de référence
+        adverses. N'affecte jamais l'état réel de la partie.
         """
-        from core.rules_engine import (
-            combination_power, generate_sequence_plays as gen_seq,
-            generate_uniform_plays as gen_uni, is_valid_sequence_combination,
-            is_valid_uniform_combination,
-        )
-
-        state = copy.deepcopy(initial_state)
+        state = self._clone_state(initial_state)
         n = len(state.hands)
         pending_action: Optional[Action] = first_action
         steps = 0
@@ -127,7 +209,7 @@ class MCTSBot(AbstractBaseAgent):
                 if not options:
                     action = Action(action_type=ActionType.ACTION_HARD_PASS)
                 else:
-                    cards, declared = self._rng.choice(options)
+                    cards, declared = min(options, key=lambda opt: self._resulting_power(opt, state.e_rev))
                     action = Action(action_type=ActionType.ACTION_PLAY, cards=cards, declared_power=declared)
             else:
                 action = self._rollout_agent_for(pid).choose_action(state)
@@ -194,16 +276,16 @@ class MCTSBot(AbstractBaseAgent):
                 state.current_player_id = candidate
 
         rank = state.finish_order.index(self.player_id) if self.player_id in state.finish_order else n - 1
-        return rank <= 1
+        return max(0.0, 1.0 - rank / max(n - 1, 1))
 
     def choose_action(self, game_state: GameState) -> Action:
         """
-        Sélectionne l'option légale maximisant le taux de victoire simulé.
+        Sélectionne l'option légale maximisant le score simulé moyen, sous budget de rollouts réparti.
 
         Paramètre `game_state` : vue matérialisée de l'état courant.
-        Retourne une instance de `Action`. Retourne un passe conforme à `pass_type` si aucune option n'est disponible. Pour chaque option
-        candidate, exécute `rollout_count` simulations via `_simulate_rollout` et retient l'option de score moyen maximal. Effet de bord :
-        consomme l'état interne de `_rng`.
+        Retourne une instance de `Action`. Retourne un passe conforme à `pass_type` si aucune option n'est disponible, ou l'unique option
+        immédiatement si une seule est légale. Sinon, préfiltre les options candidates (`_prefilter_candidates`), répartit `rollout_budget`
+        entre elles, et retient l'option de score moyen simulé maximal. Effet de bord : consomme l'état interne de `_rng`.
         """
         hand = game_state.hands[self.player_id]
         options = self._legal_options(hand, game_state)
@@ -216,15 +298,22 @@ class MCTSBot(AbstractBaseAgent):
             )
             return Action(action_type=action_type)
 
-        best_option = options[0]
+        if len(options) == 1:
+            cards, declared_power = options[0]
+            return Action(action_type=ActionType.ACTION_PLAY, cards=cards, declared_power=declared_power)
+
+        candidates = self._prefilter_candidates(options, hand.size(), game_state.e_rev)
+        rollouts_per_option = max(_MIN_ROLLOUTS_PER_OPTION, self.rollout_budget // max(len(candidates), 1))
+
+        best_option = candidates[0]
         best_score = -1.0
-        for cards, declared in options:
+        for cards, declared in candidates:
             candidate_action = Action(action_type=ActionType.ACTION_PLAY, cards=cards, declared_power=declared)
-            wins = sum(
-                1 for _ in range(self.rollout_count)
-                if self._simulate_rollout(game_state, candidate_action)
+            total = sum(
+                self._simulate_rollout(game_state, candidate_action)
+                for _ in range(rollouts_per_option)
             )
-            score = wins / self.rollout_count
+            score = total / rollouts_per_option
             if score > best_score:
                 best_score = score
                 best_option = (cards, declared)

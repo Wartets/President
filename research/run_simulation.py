@@ -28,8 +28,10 @@ from rich.table import Table
 from tqdm import tqdm
 
 import naming
+from agents.adaptive_bot import AdaptiveBot
 from agents.greedy_bot import GreedyBot
 from agents.interface import AbstractBaseAgent
+from agents.lookahead_bot import LookaheadBot
 from agents.mcts_bot import MCTSBot
 from agents.random_bot import RandomBot
 from agents.rule_based_bot import RuleBasedBot
@@ -48,6 +50,8 @@ _AGENT_REGISTRY: Dict[str, Type[Any]] = {
     "greedy_bot": GreedyBot,
     "rule_based_bot": RuleBasedBot,
     "random_bot": RandomBot,
+    "lookahead_bot": LookaheadBot,
+    "adaptive_bot": AdaptiveBot,
     "mcts_bot": MCTSBot,
 }
 
@@ -266,6 +270,7 @@ def launch_research(
     seat_profiles: Optional[List[str]] = None,
     seat_weights: Optional[Dict[int, str]] = None,
     return_summary: bool = False,
+    progress_chunk_size: int = 5,
 ) -> Optional[List[Dict[str, Any]]]:
     """
     Orchestre le lancement d'une campagne de simulation massive et l'agrégation des métriques résultantes.
@@ -287,24 +292,33 @@ def launch_research(
     Paramètre `seat_weights` : association entre identifiant de siège et chemin de poids entraîné, appliquée à chaque partie de la campagne
     pour les sièges de profil entraînable concernés.
     Paramètre `return_summary` : si vrai, retourne la liste des résumés de métriques par partie plutôt que `None`.
+    Paramètre `progress_chunk_size` : nombre maximal de parties confiées à un unique appel `run_batch.remote`. Une valeur faible (défaut 5)
+    garantit des mises à jour de progression fréquentes même pour un profil d'agent lent (ex : `mcts_bot`), au prix d'un léger surcoût de
+    planification Ray ; une valeur élevée réduit ce surcoût mais peut laisser la progression apparente figée pendant toute la durée d'un
+    lot si le profil simulé est particulièrement coûteux.
     Retourne la liste des résumés de métriques par partie si `return_summary` est vrai, sinon `None`. Effet de bord : initialise un cluster Ray
-    local, distribue les parties entre les acteurs, écrit le journal agrégé et le résumé de métriques dans `data/`, et affiche un résumé via `rich`.
+    local, distribue les parties entre les acteurs par petits lots successifs, écrit le journal agrégé et le résumé de métriques dans `data/`,
+    et affiche un résumé via `rich`.
     """
     console = Console()
     ray.init(num_cpus=num_workers, ignore_reinit_error=True, log_to_driver=False)
 
-    games_per_worker = [total_games // num_workers] * num_workers
-    for i in range(total_games % num_workers):
-        games_per_worker[i] += 1
-
     # Ray's .remote returns actor handles at runtime; silence static type checker via cast to Any
     workers = [cast(Any, GameSimulationWorker).remote(agent_profile) for _ in range(num_workers)]
+
+    chunk_size = max(1, progress_chunk_size)
+    chunks: List[int] = []
+    remaining_games = total_games
+    while remaining_games > 0:
+        take = min(chunk_size, remaining_games)
+        chunks.append(take)
+        remaining_games -= take
+
     futures = []
     future_game_counts: Dict[Any, int] = {}
     seed_cursor = base_seed
-    for worker, count in zip(workers, games_per_worker):
-        if count == 0:
-            continue
+    for chunk_index, count in enumerate(chunks):
+        worker = workers[chunk_index % num_workers]
         future = worker.run_batch.remote(
             seed_cursor, player_count, rounds_per_game, count, config_overrides, weights_path,
             seat_profiles, seat_weights,

@@ -12,9 +12,11 @@ from __future__ import annotations
 
 from typing import Callable, Dict, List, Tuple
 
+from agents.adaptive_bot import AdaptiveBot
 from agents.greedy_bot import GreedyBot
 from agents.human_agent import HumanAgent
 from agents.interface import AbstractBaseAgent
+from agents.lookahead_bot import LookaheadBot
 from agents.mcts_bot import MCTSBot
 from agents.random_bot import RandomBot
 from agents.rule_based_bot import RuleBasedBot
@@ -37,6 +39,8 @@ _AGENT_REGISTRY: Dict[str, Callable[[int, GameConfig], AbstractBaseAgent]] = {
     "random_bot": RandomBot,
     "greedy_bot": GreedyBot,
     "rule_based_bot": RuleBasedBot,
+    "lookahead_bot": LookaheadBot,
+    "adaptive_bot": AdaptiveBot,
     "mcts_bot": MCTSBot,
 }
 

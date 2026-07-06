@@ -121,16 +121,22 @@ def launch_evaluation(
     console = Console()
     ray.init(num_cpus=num_workers, ignore_reinit_error=True, log_to_driver=False)
 
-    games_per_worker = [total_games // num_workers] * num_workers
-    for i in range(total_games % num_workers):
-        games_per_worker[i] += 1
-
     workers = [cast(Any, EvaluationWorker).remote() for _ in range(num_workers)]
+
+    # Répartition en petits lots successifs plutôt qu'en un unique lot par acteur, afin que la progression affichée se mette à jour régulièrement
+    # même si un profil de siège coûteux (par exemple mcts_bot) ralentit fortement un sous-ensemble des parties.
+    chunk_size = max(1, min(5, total_games))
+    chunks: List[int] = []
+    remaining_games = total_games
+    while remaining_games > 0:
+        take = min(chunk_size, remaining_games)
+        chunks.append(take)
+        remaining_games -= take
+
     futures = []
     seed_cursor = base_seed
-    for worker, count in zip(workers, games_per_worker):
-        if count == 0:
-            continue
+    for chunk_index, count in enumerate(chunks):
+        worker = workers[chunk_index % num_workers]
         futures.append(
             worker.run_batch.remote(
                 seed_cursor, seat_profiles, rounds_per_game, count, seat_weights, config_overrides,
