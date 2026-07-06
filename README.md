@@ -50,6 +50,8 @@ President/
 ├── requirements.txt       # Dépendances Python (pip install -r requirements.txt)
 ├── LICENSE                # Licence MIT (2026 Wartets)
 ├── play_game.py           # Point d'entrée interactif en console
+├── step_by_step_run.py    # Exécution pas à pas d'une partie pour débogage
+├── naming.py              # Gestion des noms de fichiers et chemins
 │
 ├── documentation/
 │   ├── architecture.md    # Architecture du framework
@@ -80,7 +82,7 @@ President/
 │   ├── greedy_bot.py            # Joue toujours la carte/combinaison la plus basse suffisante
 │   ├── rule_based_bot.py        # Joue selon des règles prédéfinies
 │   ├── mcts_bot.py              # Joue en utilisant Monte Carlo Tree Search
-│   └── human_agent.py           # Interface pour joueur humain
+│   ├── human_agent.py           # Interface pour joueur humain
 │   ├── rl_agent.py              # Politique linéaire entraînable
 │   └── torch_rl_agent.py        # Politique neuronale entraînable, inférence par lot GPU
 │
