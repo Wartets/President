@@ -18,10 +18,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import traceback
 from typing import Any, Dict, Optional
 
 import numpy as np
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import naming
 from core.config import GameConfig
@@ -294,7 +297,7 @@ def _step_generate_final_report(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def run_pipeline(
-    player_count: int = 4,
+    player_count: int = 5,
     training_rounds: int = 2000,
     distributed_steps: int = 200,
     baseline_games_per_profile: int = 100,
@@ -363,7 +366,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Pipeline automatique complet : entraînement, évaluation, graphiques et rapport final."
     )
-    parser.add_argument("--player-count", type=int, default=4)
+    parser.add_argument("--player-count", type=int, default=5)
     parser.add_argument("--training-rounds", type=int, default=2000)
     parser.add_argument("--distributed-steps", type=int, default=200)
     parser.add_argument("--baseline-games-per-profile", type=int, default=100)

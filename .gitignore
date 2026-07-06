@@ -180,8 +180,8 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 .vscode
-*.npy
-*.parquet
+data
+weights
 todo
 tests
 research/extract_notebook_cells.py
