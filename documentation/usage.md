@@ -30,7 +30,7 @@ Le projet implémente une version paramétrable du jeu de cartes Président, ave
 * un moteur de règles pur et sans effet de bord (`core.rules_engine`, `core.math_utils`, `core.models`, `core.config`) ;
 * un moteur d'exécution de manche complète orienté événements (`engine.round.run_round`, `engine.game_runner.Game`) ;
 * un moteur d'exécution vectorisé `numpy` pour l'entraînement à haut débit, sans passer par le système d'événements (`training.fast_path.FastPathEngine`) ;
-* huit profils d'agents prêts à l'emploi, détaillés en [section 4.2](#42-sièges-disponibles---seats) (`random_bot`, `greedy_bot`, `rule_based_bot`, `lookahead_bot`, `adaptive_bot`, `scoring_bot`, `mcts_bot`, `human_agent`) plus deux agents entraînables sélectionnables au même titre via leur nom de module (`rl_agent` à politique linéaire, `torch_rl_agent` à politique neuronale), chaque nom de profil correspondant exactement au fichier `agents/<profil>.py` qui le définit ; voir la hiérarchie de complexité complète dans [`architecture.md`, section 5.3](architecture.md#53-gradation-algorithmique-des-profils-fournis) ;
+* dix profils d'agents prêts à l'emploi, détaillés en [section 4.2](#42-sièges-disponibles---seats) (`random_bot`, `greedy_bot`, `aggressive_bot`, `rule_based_bot`, `lookahead_bot`, `adaptive_bot`, `scoring_bot`, `probabilistic_bot`, `mcts_bot`, `human_agent`) plus deux agents entraînables sélectionnables au même titre via leur nom de module (`rl_agent` à politique linéaire, `torch_rl_agent` à politique neuronale), chaque nom de profil correspondant exactement au fichier `agents/<profil>.py` qui le définit et centralisé dans le registre partagé `registry.agent_registry` (voir [section 14](#14-écrire-son-propre-agent)) ; voir la hiérarchie de complexité complète dans [`architecture.md`, section 5.3](architecture.md#53-gradation-algorithmique-des-profils-fournis) ;
 * un système d'événements complet (`events.structural`, `events.transactional`, `engine.event_bus.EventBus`) permettant de journaliser, rejouer et analyser n'importe quelle partie ;
 * une couche d'analyse (`analytics.event_logger.EventLogger`, `analytics.metrics_calc`) transformant le flux d'événements en métriques exploitables (Gini, entropie, taux de passe sous-optimal, matrice de transition de rôles, etc.) ;
 * une chaîne d'entraînement distribué complète (`training.rollout_worker.RolloutWorker`, `training.replay_buffer.RedisReplayBuffer`, `training.trainer.Trainer`, `training.launch_distributed`), reposant sur `ray` pour la parallélisation et `redis` comme tampon de rejeu partagé.
@@ -116,6 +116,7 @@ python play_game.py --player-count 4 --seats human,greedy,greedy,greedy --rounds
 | `human_agent` | `agents.human_agent.HumanAgent` | Sollicite chaque décision par saisie clavier, affiche la main, la puissance à dépasser et l'état de la Révolution. |
 | `random_bot` | `agents.random_bot.RandomBot` | Choisit uniformément une option légale parmi toutes celles disponibles (uniformes et suites). |
 | `greedy_bot` | `agents.greedy_bot.GreedyBot` | Joue systématiquement la combinaison légale de puissance résultante minimale. |
+| `aggressive_bot` | `agents.aggressive_bot.AggressiveBot` | Joue systématiquement la combinaison légale de puissance résultante la plus élevée, à l'inverse exact de `greedy_bot`. |
 | `rule_based_bot` | `agents.rule_based_bot.RuleBasedBot` | Applique des heuristiques déterministes : évite de déclencher la pénalité de sortie étendue quand une alternative existe, préserve les combinaisons de taille ≥ 4 tant que la main compte plus de 4 cartes, puis choisit la puissance minimale suffisante. |
 | `lookahead_bot` | `agents.lookahead_bot.LookaheadBot` | Étend `RuleBasedBot` d'une anticipation locale : parmi les options de puissance résultante minimale à égalité, retient celle qui laisse la main résiduelle la plus flexible (nombre de combinaisons encore jouables après retrait). |
 | `adaptive_bot` | `agents.adaptive_bot.AdaptiveBot` | Ajuste dynamiquement son filtre de réserve de combinaisons selon la position relative de sa main face aux adversaires actifs : relâche le filtre en cas de retard, le resserre en cas d'avance. |
@@ -855,14 +856,17 @@ Points impératifs à respecter, contrôlés par le moteur (`core.rules_engine.i
 
 Pour bénéficier d'une inférence par lot optimisée (utile notamment avec le moteur vectorisé ou pour l'entraînement distribué), surcharger `get_batch_action(self, game_states)` plutôt que de laisser l'implémentation par défaut de `AbstractBaseAgent` appeler `choose_action` séquentiellement ; voir `agents.rl_agent.RLAgent.get_batch_action` et `agents.torch_rl_agent.TorchRLAgent.get_batch_action` pour deux exemples complets d'inférence matricielle groupée.
 
-Pour intégrer le nouvel agent à `play_game.py`, l'ajouter simplement à `_AGENT_REGISTRY` dans `play_game.py` :
+Pour intégrer le nouvel agent à l'ensemble du projet (`play_game.py`, `step_by_step_run.py`, `research.run_simulation` et tous les scripts qui en dépendent), l'ajouter simplement à `HEURISTIC_AGENT_REGISTRY` dans `registry/agent_registry.py` :
 
 ```python
 from agents.first_option_bot import FirstOptionBot
-_AGENT_REGISTRY["first_option"] = FirstOptionBot
+
+HEURISTIC_AGENT_REGISTRY["first_option"] = FirstOptionBot
 ```
 
-Pour un exemple réel plus élaboré combinant plusieurs critères pondérés plutôt qu'une unique règle de choix, voir `agents/scoring_bot.py` (`ScoringBot`), décrit dans [`architecture.md`, section 5.3](architecture.md#53-gradation-algorithmique-des-profils-fournis) et référencé dans le tableau de [section 4.2](#42-sièges-disponibles---seats).
+Cette unique modification suffit : `registry.agent_registry.build_agent`, `ALL_SEAT_PROFILES`/`ALL_AUTOMATED_PROFILES` et l'ensemble des points d'entrée qui en dépendent exposent immédiatement le nouveau profil, sans nécessiter de modification manuelle répétée dans chaque script consommateur.
+
+Pour un exemple réel plus élaboré combinant plusieurs critères pondérés plutôt qu'une unique règle de choix, voir `agents/scoring_bot.py` (`ScoringBot`) ; pour un exemple d'agent raisonnant sur un comptage probabiliste des cartes restantes plutôt que sur la seule structure de la main, voir `agents/probabilistic_bot.py` (`ProbabilisticBot`). Les deux sont décrits dans [`architecture.md`, section 5.3](architecture.md#53-gradation-algorithmique-des-profils-fournis) et référencés dans le tableau de [section 4.2](#42-sièges-disponibles---seats).
 
 ## 15. Suivi en temps réel d'une campagne (`analytics.live_monitor.LiveMonitor`)
 

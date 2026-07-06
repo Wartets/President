@@ -1,267 +1,452 @@
 """
-Module de la boucle d'entraînement par politique linéaire (REINFORCE).
+Module de lancement de simulations massives parallélisées.
 
-Le module implémente l'entraînement de `agents.rl_agent.RLAgent` par un algorithme REINFORCE simplifié : les poids de la politique
-linéaire sont ajustés proportionnellement au gradient du score des options choisies, pondéré par le retour cumulé (point de victoire de la
-manche). L'entraînement utilise le moteur événementiel complet ; le moteur vectorisé possède une boucle dédiée.
+Le module implémente le lanceur de recherche : distribution de $P$ parties indépendantes sur les cœurs disponibles via `ray`, chaque partie
+accumulant ses événements dans un `EventLogger` dédié, vidangé périodiquement au format Parquet. Le module agrège ensuite un sous-ensemble
+des métriques de `analytics.metrics_calc` sur l'ensemble des parties simulées.
 
-Le module dépend de `core.config`, `agents.rl_agent`, `agents.greedy_bot`, `agents.rule_based_bot`, `engine.game_runner`, `engine.event_bus`
-et de `numpy`. Dépendance externe : `tqdm` pour le suivi de progression, `rich` pour le tableau de bord console.
+Le module dépend de `ray`, `core.config`, `registry.agent_registry`, `engine.game_runner`, `analytics.event_logger`,
+`analytics.metrics_calc` et `rich`/`tqdm` pour le suivi de progression.
 """
-
 from __future__ import annotations
 
-import argparse
-import copy
-from typing import Callable, Dict, List, Optional, Tuple
+import os
+import sys
 
-import numpy as np
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+import argparse
+import os
+import shutil
+import time
+from typing import Any, Dict, List, Optional, Type, cast
+
+import polars as pl
+import ray
 from rich.console import Console
 from rich.table import Table
 from tqdm import tqdm
 
 import naming
-from agents.greedy_bot import GreedyBot
-from agents.rl_agent import FEATURE_DIM, RLAgent, _option_features
-from agents.rule_based_bot import RuleBasedBot
 from agents.interface import AbstractBaseAgent
+from analytics.event_logger import EventLogger
+from analytics.live_monitor import LiveMonitor
+from analytics.metrics_calc import (
+    action_space_entropy, branching_factor_average, e_rev_volatility,
+    gini_initial_hand_power, trick_length_average,
+)
 from core.config import GameConfig
-from engine.event_bus import EventBus
+from core.math_utils import f_std
 from engine.game_runner import Game
+from events.structural import EventRoundStart
+from registry.agent_registry import (
+    ALL_AUTOMATED_PROFILES, AUTOMATED_AGENT_REGISTRY, TRAINED_AGENT_PROFILES, build_agent,
+)
 
-# Taux d'apprentissage du gradient de politique.
-_DEFAULT_LEARNING_RATE = 0.01
+# Registre des profils heuristiques automatisés (exclut `human_agent`), conservé sous ce nom pour compatibilité avec les autres modules du
+# projet qui l'importent directement (`research.run_pipeline`, `research.evaluate_agent`).
+_AGENT_REGISTRY: Dict[str, Type[Any]] = AUTOMATED_AGENT_REGISTRY
 
-# Coefficient de décroissance de l'exploration `epsilon` par bloc d'entraînement.
-_EPSILON_DECAY = 0.995
-_EPSILON_MIN = 0.02
+# Profils entraînables dont la construction nécessite le chargement d'un fichier de poids (`agents.rl_agent.RLAgent` ou
+# `agents.torch_rl_agent.TorchRLAgent`). Le nom de chaque profil correspond exactement au nom du module Python dans lequel la classe d'agent est 
+# définie.
+_TRAINED_AGENT_PROFILES = TRAINED_AGENT_PROFILES
+
+# Ensemble complet des profils utilisables pour un siège, qu'ils proviennent de `_AGENT_REGISTRY` ou de `_TRAINED_AGENT_PROFILES`.
+_ALL_SEAT_PROFILES = ALL_AUTOMATED_PROFILES
+
+# Présets nommés de configuration de règles, utilisés par `--config-preset` et par la recherche combinatoire (`research.grid_search`).
+_RULE_PRESETS: Dict[str, Dict[str, Any]] = {
+    "base": {},
+    "straights": {"straights_enabled": True},
+    "interception": {"interception_enabled": True, "double_revolution_enabled": True},
+    "full": {
+        "straights_enabled": True,
+        "skip_turn_enabled": True,
+        "interception_enabled": True,
+        "double_revolution_enabled": True,
+        "putsch_enabled": True,
+        "blind_tax_enabled": True,
+        "finish_penalty_enabled": True,
+        "finish_penalty_extended": True,
+        "no_finish_on_joker": True,
+        "no_finish_on_revolution": True,
+    },
+    "magic_rank_10": {"magic_card_enabled": True, "magic_card_rank": "10", "magic_two": False},
+    "revolution_off": {"revolution_enabled": False},
+    "legacy_vp": {"vp_distribution_type": "LEGACY_STEPPED"},
+    "linear_vp": {"vp_distribution_type": "LINEAR"},
+    "allow_soft_pass": {"pass_type": "ALLOW_SOFT"},
+    "skip_turn": {"skip_turn_enabled": True},
+    "double_revolution": {"double_revolution_enabled": True},
+    "putsch_blind_tax": {"putsch_enabled": True, "blind_tax_enabled": True},
+    "finish_penalty_instant": {
+        "finish_penalty_enabled": True,
+        "finish_penalty_extended": True,
+        "no_finish_on_joker": True,
+        "no_finish_on_revolution": True,
+    },
+    "finish_penalty_draw": {
+        "finish_penalty_enabled": True,
+        "finish_penalty_type": "PENALTY_DRAW_CARDS",
+        "finish_penalty_draw_count": 2,
+    },
+    "strict_remainder": {"strict_remainder_allocation": True},
+    "straights_skip_turn": {"straights_enabled": True, "skip_turn_enabled": True},
+    "skip_on_equal": {"skip_on_equal": True},
+}
 
 
-class ReturnTracker:
-    """
-    Collecteur des transitions `(features, score, retour)` d'un agent entraîné sur une manche.
-
-    Champ `records` : liste de tuples `(feature_vector, chosen_score, return_value)` accumulés sur la manche courante.
-    """
-
-    def __init__(self) -> None:
-        self.records: List[np.ndarray] = []
-
-    def reset(self) -> None:
-        """
-        Vide le tampon de transitions accumulées.
-
-        Retourne `None`. Effet de bord : réinitialise `records`.
-        """
-        self.records.clear()
-
-
-def _run_training_round(
+def _build_agents(
+    agent_profile: str,
     config: GameConfig,
-    trainee: RLAgent,
-    opponents: Dict[int, AbstractBaseAgent],
-    tracker: List[Tuple[np.ndarray, float, float]],
-    round_index: int,
-    previous_roles,
-    game_id: str,
-) -> Tuple[float, Optional[Dict[int, str]]]:
+    weights_path: Optional[str],
+    seat_profiles: Optional[List[str]] = None,
+    seat_weights: Optional[Dict[int, str]] = None,
+) -> Dict[int, AbstractBaseAgent]:
     """
-    Exécute une unique manche d'entraînement et collecte les caractéristiques des décisions du joueur entraîné.
+    Construit l'association joueur/agent pour une partie donnée.
 
+    Paramètre `agent_profile` : profil appliqué à tous les sièges lorsque `seat_profiles` n'est pas fourni, clé de `_AGENT_REGISTRY` ou de
+    `_TRAINED_AGENT_PROFILES`.
     Paramètre `config` : configuration de la partie.
-    Paramètre `trainee` : instance de `RLAgent` dont la politique est entraînée.
-    Paramètre `opponents` : association entre identifiant de joueur et agent adverse fixe pour cette manche.
-    Paramètre `tracker` : liste mutée en place, recevant un tuple `(feature_vector, chosen_score)` par décision `ACTION_PLAY` du joueur entraîné.
-    Paramètre `round_index` : index de la manche à exécuter.
-    Paramètre `previous_roles` : rôles issus de la manche précédente, ou `None`.
-    Paramètre `game_id` : identifiant de la partie hôte de la manche.
-    Retourne le point de victoire obtenu par `trainee` sur cette manche. Effet de bord : peuple `tracker`, publie les événements de la manche sur
-    un `EventBus` local jetable.
+    Paramètre `weights_path` : chemin d'un fichier de poids entraîné par défaut, appliqué au siège 0 lorsque celui-ci est d'un profil entraînable
+    et qu'aucune entrée `seat_weights` ne le concerne.
+    Paramètre `seat_profiles` : association ordonnée de profils par siège, un profil distinct par identifiant de joueur ; si `None`, `agent_profile`
+    est appliqué à l'ensemble des sièges.
+    Paramètre `seat_weights` : association entre identifiant de siège et chemin de poids entraîné, prioritaire sur `weights_path` pour le siège
+    concerné.
+    Retourne un dictionnaire complet d'agents, de taille `config.player_count`, chaque agent construit via `registry.agent_registry.build_agent`.
+    Aucun effet de bord hors chargement disque des poids éventuels.
     """
-    from engine.round import run_round
+    profiles = seat_profiles if seat_profiles is not None else [agent_profile] * config.player_count
+    weights_map = seat_weights or {}
 
-    agents = dict(opponents)
-    agents[trainee.player_id] = trainee
-
-    original_choose = trainee.choose_action
-
-    def _instrumented_choose(game_state):
-        hand = game_state.hands[trainee.player_id]
-        options = trainee._legal_options(hand, game_state)
-        action = original_choose(game_state)
-        if options and action.cards:
-            hand_size = hand.size()
-            features = _option_features(action.cards, action.declared_power, hand_size, game_state.e_rev)
-            scores = np.stack([
-                _option_features(c, d, hand_size, game_state.e_rev) for c, d in options
-            ]) @ trainee.weights
-            chosen_score = float(features @ trainee.weights)
-            tracker.append((features, chosen_score, max(scores) if len(scores) else chosen_score))
-        return action
-
-    trainee.choose_action = _instrumented_choose  # type: ignore[assignment]
-    try:
-        roles, vp_by_player, _finish_order = run_round(
-            config, agents, EventBus(), round_index, previous_roles, game_id
-        )
-    finally:
-        trainee.choose_action = original_choose  # type: ignore[assignment]
-
-    return vp_by_player.get(trainee.player_id, 0.0), roles
+    agents: Dict[int, AbstractBaseAgent] = {}
+    for pid in range(config.player_count):
+        profile = profiles[pid] if pid < len(profiles) else agent_profile
+        default_weights = weights_path if (profile in _TRAINED_AGENT_PROFILES and pid == 0) else None
+        seat_weight_path = weights_map.get(pid, default_weights)
+        agents[pid] = build_agent(profile, pid, config, seat_weight_path)
+    return agents
 
 
-def train(
-    config: GameConfig,
-    total_rounds: int,
-    learning_rate: float = _DEFAULT_LEARNING_RATE,
-    opponent_pool: str = "mixed",
-    initial_weights: Optional[np.ndarray] = None,
-    initial_epsilon: float = 0.3,
-    stop_check: Optional[Callable[[], bool]] = None,
-    on_round: Optional[Callable[[int], None]] = None,
-) -> Tuple[RLAgent, List[float]]:
+@ray.remote
+class GameSimulationWorker:
     """
-    Entraîne un `RLAgent` par ajustement de gradient de politique sur un nombre fixé de manches.
+    Acteur Ray encapsulant l'exécution séquentielle d'un lot de parties complètes.
 
-    Paramètre `config` : configuration de la partie utilisée pour toutes les manches d'entraînement.
-    Paramètre `total_rounds` : nombre total de manches d'entraînement exécutées lors de cet appel, entier strictement positif.
-    Paramètre `learning_rate` : taux d'apprentissage du gradient de politique, nombre strictement positif.
-    Paramètre `opponent_pool` : nature des adversaires simulés, chaîne parmi `'greedy'`, `'rule_based'`, `'mixed'`.
-    Paramètre `initial_weights` : poids de politique de départ, utilisés pour reprendre un entraînement antérieur ; poids nuls si `None`.
-    Paramètre `initial_epsilon` : taux d'exploration de départ.
-    Paramètre `stop_check` : fonction sans argument consultée avant chaque manche ; si elle retourne vrai, l'entraînement s'arrête
-    proprement avant la manche suivante et retourne l'état accumulé jusque-là, permettant une reprise ultérieure sans perte de travail.
-    Paramètre `on_round` : fonction optionnelle invoquée après chaque manche avec l'index de la manche, utile pour piloter un affichage
-    de progression externe sans dupliquer la barre `tqdm` interne.
-    Retourne un tuple `(trainee, running_vp)` : l'instance de `RLAgent` entraînée portant les poids ajustés, et la liste des points de
-    victoire obtenus manche après manche (de taille potentiellement inférieure à `total_rounds` si `stop_check` a déclenché un arrêt
-    anticipé). Effet de bord : affiche un tableau de bord `rich` de progression et met à jour `trainee.weights`/`trainee.epsilon`
-    à chaque manche.
+    Champ `agent_profile` : nom du profil d'agent appliqué à l'ensemble des sièges (ou au siège 0 pour un profil entraîné), clé de
+    `_AGENT_REGISTRY` ou de `_TRAINED_AGENT_PROFILES`.
+    """
+
+    def __init__(self, agent_profile: str) -> None:
+        self.agent_profile = agent_profile
+
+    def run_batch(
+        self,
+        base_seed: int,
+        player_count: int,
+        rounds_per_game: int,
+        game_count: int,
+        config_overrides: Optional[Dict[str, Any]] = None,
+        weights_path: Optional[str] = None,
+        seat_profiles: Optional[List[str]] = None,
+        seat_weights: Optional[Dict[int, str]] = None,
+    ) -> Dict[str, List[dict]]:
+        """
+        Exécute séquentiellement `game_count` parties complètes et retourne événements et résumés.
+
+        Paramètre `base_seed` : graine de base, chaque partie du lot utilisant `base_seed + offset` comme graine distincte.
+        Paramètre `player_count` : nombre de joueurs $N$ par partie.
+        Paramètre `rounds_per_game` : nombre de manches jouées par partie.
+        Paramètre `game_count` : nombre de parties du lot confié à cet acteur.
+        Paramètre `config_overrides` : champs supplémentaires de `GameConfig` à appliquer à chaque partie du lot.
+        Paramètre `weights_path` : chemin d'un fichier de poids entraîné par défaut, transmis à `_build_agents` pour les profils de
+        `_TRAINED_AGENT_PROFILES`.
+        Paramètre `seat_profiles` : association ordonnée de profils par siège, permettant de composer une partie hétérogène plutôt qu'un profil
+        unique appliqué à tous les sièges.
+        Paramètre `seat_weights` : association entre identifiant de siège et chemin de poids entraîné.
+        Retourne un dictionnaire `{"records": ..., "summaries": ...}` : `records` est la liste plate des enregistrements d'événements agrégés sur
+        l'ensemble des parties du lot, `summaries` une liste de dictionnaires de métriques résumées, une entrée par partie. Effet de bord : aucun
+        hors de l'acteur, chaque partie utilise un `EventLogger` et un `Game` locaux et jetables.
+        """
+        overrides = config_overrides or {}
+        all_records: List[dict] = []
+        summary_rows: List[dict] = []
+        for offset in range(game_count):
+            seed = base_seed + offset
+            config = GameConfig(random_seed=seed, player_count=player_count, **overrides)
+            agents = _build_agents(self.agent_profile, config, weights_path, seat_profiles, seat_weights)
+            logger = EventLogger()
+            from engine.event_bus import EventBus
+
+            bus = EventBus()
+            bus.subscribe(logger)
+            game = Game(config, agents, event_bus=bus, game_id=f"sim-{seed}")
+            game.play_rounds(rounds_per_game)
+
+            gini_values: List[float] = []
+            for round_start in logger.events_of_type(EventRoundStart):
+                hand_powers: Dict[int, float] = {
+                    pid: float(sum(f_std(c) for c in cards if c.rank.value != "JOKER"))
+                    for pid, cards in round_start.initial_hands.items()
+                }
+                gini_values.append(gini_initial_hand_power(hand_powers))
+
+            summary_rows.append({
+                "seed": seed,
+                "player_count": player_count,
+                "agent_profile": self.agent_profile,
+                "seat_profiles": ",".join(seat_profiles) if seat_profiles else self.agent_profile,
+                "rounds_per_game": rounds_per_game,
+                "branching_factor_average": branching_factor_average(logger),
+                "action_space_entropy": action_space_entropy(logger),
+                "e_rev_volatility": e_rev_volatility(logger),
+                "trick_length_average": trick_length_average(logger),
+                "gini_initial_hand_power_mean": (
+                    sum(gini_values) / len(gini_values) if gini_values else 0.0
+                ),
+                **{f"config_{key}": value for key, value in overrides.items()},
+            })
+
+            all_records.extend(logger.to_records())
+        return {"records": all_records, "summaries": summary_rows}
+
+
+def launch_research(
+    total_games: int,
+    player_count: int,
+    rounds_per_game: int,
+    agent_profile: str,
+    num_workers: int,
+    output_parquet: Optional[str],
+    base_seed: int,
+    experiment_name: str = "simulation",
+    config_overrides: Optional[Dict[str, Any]] = None,
+    weights_path: Optional[str] = None,
+    seat_profiles: Optional[List[str]] = None,
+    seat_weights: Optional[Dict[int, str]] = None,
+    return_summary: bool = False,
+    progress_chunk_size: int = 5,
+    shutdown_ray: bool = True,
+    stop_check: Optional[Any] = None,
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    Orchestre le lancement d'une campagne de simulation massive et l'agrégation des métriques résultantes.
+
+    Paramètre `total_games` : nombre total de parties à simuler, entier strictement positif.
+    Paramètre `player_count` : nombre de joueurs $N$ par partie.
+    Paramètre `rounds_per_game` : nombre de manches jouées par partie.
+    Paramètre `agent_profile` : profil d'agent appliqué (clé de `_AGENT_REGISTRY` ou de `_TRAINED_AGENT_PROFILES`).
+    Paramètre `num_workers` : nombre d'acteurs Ray parallèles, borné par le nombre de cœurs disponibles.
+    Paramètre `output_parquet` : chemin du fichier Parquet de destination, nommé automatiquement selon la convention du projet et placé dans
+    `data/` si `None`.
+    Paramètre `base_seed` : graine de base de la campagne, chaque partie recevant une graine dérivée distincte.
+    Paramètre `experiment_name` : nom de la campagne, utilisé pour la nomenclature automatique des fichiers.
+    Paramètre `config_overrides` : champs supplémentaires de `GameConfig` appliqués à toutes les parties de la campagne, par exemple un préset
+    de `_RULE_PRESETS`.
+    Paramètre `weights_path` : chemin d'un fichier de poids entraîné, transmis pour les profils de `_TRAINED_AGENT_PROFILES`.
+    Paramètre `seat_profiles` : association ordonnée de profils par siège, permettant de composer une campagne de parties hétérogènes plutôt
+    qu'un profil unique appliqué à tous les sièges de toutes les parties.
+    Paramètre `seat_weights` : association entre identifiant de siège et chemin de poids entraîné, appliquée à chaque partie de la campagne
+    pour les sièges de profil entraînable concernés.
+    Paramètre `return_summary` : si vrai, retourne la liste des résumés de métriques par partie plutôt que `None`.
+    Paramètre `progress_chunk_size` : nombre maximal de parties confiées à un unique appel `run_batch.remote`. Une valeur faible (défaut 5)
+    garantit des mises à jour de progression fréquentes même pour un profil d'agent lent (ex : `mcts_bot`), au prix d'un léger surcoût de
+    planification Ray ; une valeur élevée réduit ce surcoût mais peut laisser la progression apparente figée pendant toute la durée d'un
+    lot si le profil simulé est particulièrement coûteux.
+    Paramètre `shutdown_ray` : si faux, ne ferme pas le cluster Ray à la fin de l'appel, permettant d'enchaîner plusieurs campagnes
+    successives (par exemple depuis `research.run_pipeline`) sans reconstruire un cluster à chaque fois.
+    Paramètre `stop_check` : fonction sans argument consultée régulièrement pendant l'attente des résultats ; si elle retourne vrai, les
+    tâches Ray encore en attente sont annulées au mieux et la fonction retourne immédiatement avec les résultats déjà collectés, sans
+    perdre le travail déjà accompli.
+    Retourne la liste des résumés de métriques par partie si `return_summary` est vrai, sinon `None`. Effet de bord : initialise un cluster Ray
+    local, distribue les parties entre les acteurs par petits lots successifs, écrit le journal agrégé et le résumé de métriques dans `data/`,
+    et affiche un résumé via `rich`.
     """
     console = Console()
-    trainee = RLAgent(player_id=0, config=config, weights=initial_weights, epsilon=initial_epsilon)
+    ray.init(num_cpus=num_workers, ignore_reinit_error=True, log_to_driver=False)
 
-    opponent_classes = {
-        "greedy": [GreedyBot] * (config.player_count - 1),
-        "rule_based": [RuleBasedBot] * (config.player_count - 1),
-        "mixed": [GreedyBot, RuleBasedBot] * config.player_count,
-    }[opponent_pool][: config.player_count - 1]
+    # Ray's .remote returns actor handles at runtime; silence static type checker via cast to Any
+    workers = [cast(Any, GameSimulationWorker).remote(agent_profile) for _ in range(num_workers)]
 
-    running_vp: List[float] = []
-    roles = None
+    chunk_size = max(1, progress_chunk_size)
+    chunks: List[int] = []
+    remaining_games = total_games
+    while remaining_games > 0:
+        take = min(chunk_size, remaining_games)
+        chunks.append(take)
+        remaining_games -= take
 
-    progress_bar = tqdm(range(total_rounds), desc="Entraînement RLAgent", unit="manche")
-    for round_index in progress_bar:
-        if stop_check is not None and stop_check():
-            progress_bar.close()
-            break
-        opponents = {
-            pid + 1: opponent_classes[pid](pid + 1, config)
-            for pid in range(config.player_count - 1)
-        }
-        tracker: List[Tuple[np.ndarray, float, float]] = []
-        vp, roles = _run_training_round(
-            config, trainee, opponents, tracker, round_index, roles, "training-game"
+    futures = []
+    future_game_counts: Dict[Any, int] = {}
+    seed_cursor = base_seed
+    for chunk_index, count in enumerate(chunks):
+        worker = workers[chunk_index % num_workers]
+        future = worker.run_batch.remote(
+            seed_cursor, player_count, rounds_per_game, count, config_overrides, weights_path,
+            seat_profiles, seat_weights,
         )
-        running_vp.append(vp)
-        if on_round is not None:
-            on_round(round_index)
+        futures.append(future)
+        future_game_counts[future] = count
+        seed_cursor += count
 
-        if tracker:
-            baseline = float(np.mean([r[2] for r in tracker]))
-            gradient = np.zeros(FEATURE_DIM, dtype=np.float64)
-            for features, chosen_score, _ in tracker:
-                advantage = vp - baseline
-                gradient += advantage * features
-            gradient /= len(tracker)
-            trainee.weights = trainee.weights + learning_rate * gradient
+    start = time.time()
+    all_records: List[dict] = []
+    all_summaries: List[Dict[str, Any]] = []
+    interrupted = False
+    with tqdm(total=len(futures), desc="Simulating", unit="batch", mininterval=0.5) as bar, LiveMonitor(console=console) as monitor:
+        pending = list(futures)
+        while pending:
+            if stop_check is not None and stop_check():
+                interrupted = True
+                for leftover in pending:
+                    try:
+                        ray.cancel(leftover, force=False)
+                    except Exception:
+                        pass
+                break
+            done, pending = ray.wait(pending, num_returns=1, timeout=1.0)
+            if not done:
+                continue
+            batch_result = ray.get(done[0])
+            all_records.extend(batch_result["records"])
+            all_summaries.extend(batch_result["summaries"])
+            monitor.record_games(future_game_counts.get(done[0], 0))
+            bar.update(1)
+    elapsed = time.time() - start
+    if interrupted:
+        console.print("[bold dark_orange]Arrêt demandé : campagne interrompue proprement, résultats partiels conservés.[/bold dark_orange]")
 
-        trainee.epsilon = max(_EPSILON_MIN, trainee.epsilon * _EPSILON_DECAY)
+    if output_parquet is None:
+        output_parquet = naming.build_research_filename(
+            experiment_name, player_count, agent_profile, total_games, rounds_per_game,
+        )
 
-        if (round_index + 1) % 100 == 0:
-            table = Table(title=f"Progression, manche {round_index + 1}/{total_rounds}")
-            table.add_column("Métrique")
-            table.add_column("Valeur")
-            table.add_row("VP moyen (100 dernières manches)", f"{np.mean(running_vp[-100:]):.3f}")
-            table.add_row("Epsilon courant", f"{trainee.epsilon:.4f}")
-            table.add_row("Poids de politique", np.array2string(trainee.weights, precision=4))
-            console.print(table)
+    logger = EventLogger()
+    logger._parquet_buffer = all_records
+    if os.path.isdir(output_parquet):
+        shutil.rmtree(output_parquet)
+    elif os.path.exists(output_parquet):
+        os.remove(output_parquet)
+    logger.flush_to_parquet(output_parquet)
+    logger.close()
 
-    return trainee, running_vp
+    summary_path = naming.build_research_filename(
+        experiment_name, player_count, agent_profile, total_games, rounds_per_game,
+        extension="summary.csv",
+    )
+    if all_summaries:
+        pl.DataFrame(all_summaries).write_csv(summary_path)
+
+    table = Table(title=f"Campagne de recherche, profil {agent_profile}")
+    table.add_column("Métrique")
+    table.add_column("Valeur")
+    table.add_row("Parties simulées", str(total_games))
+    table.add_row("Durée totale (s)", f"{elapsed:.2f}")
+    table.add_row("Parties / seconde", f"{total_games / elapsed:.2f}")
+    table.add_row("Événements journalisés", str(len(all_records)))
+    table.add_row("Fichier Parquet", output_parquet)
+    table.add_row("Fichier de résumé", summary_path if all_summaries else "non écrit (aucun résumé)")
+    console.print(table)
+
+    if shutdown_ray:
+        ray.shutdown()
+
+    if return_summary:
+        return all_summaries
+    return None
 
 
 def main() -> None:
     """
-    Point d'entrée en ligne de commande de l'entraînement du `RLAgent`.
+    Point d'entrée en ligne de commande du lanceur de recherche.
 
-    Retourne `None`. Effet de bord : lit les arguments de la ligne de commande, exécute `train` (en reprenant un entraînement antérieur
-    si `--resume` est fourni), puis sauvegarde les poids finaux et leur historique d'entraînement, nommés selon la convention du projet,
-    dans le répertoire `weights/`.
+    Retourne `None`. Effet de bord : lit les arguments de la ligne de commande et invoque `launch_research`, ou affiche des informations de
+    contrôle (`--list-profiles`, `--list-presets`, `--dry-run`) sans lancer de campagne.
     """
-    parser = argparse.ArgumentParser(description="Entraînement REINFORCE de agents.rl_agent.RLAgent")
-    parser.add_argument("--rounds", type=int, default=5000)
+    parser = argparse.ArgumentParser(description="Lanceur de simulations massives parallélisées")
+    parser.add_argument("--games", type=int, default=1000)
     parser.add_argument("--player-count", type=int, default=4)
-    parser.add_argument("--learning-rate", type=float, default=_DEFAULT_LEARNING_RATE)
-    parser.add_argument("--opponent-pool", choices=["greedy", "rule_based", "mixed"], default="mixed")
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--model-name", type=str, default="rl_weights")
+    parser.add_argument("--rounds-per-game", type=int, default=10)
+    parser.add_argument(
+        "--agent-profile",
+        choices=list(_ALL_SEAT_PROFILES),
+        default="rule_based_bot",
+    )
+    parser.add_argument("--seat-profiles", type=str, default=None)
+    parser.add_argument("--seat-weights", type=str, default=None)
+    parser.add_argument("--workers", type=int, default=os.cpu_count() or 4)
     parser.add_argument("--output", type=str, default=None)
-    parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--experiment-name", type=str, default="simulation")
+    parser.add_argument("--config-preset", choices=list(_RULE_PRESETS.keys()), default="base")
+    parser.add_argument("--weights-path", type=str, default=None)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--list-profiles", action="store_true",
+        help="Affiche la liste des profils de siège disponibles puis quitte sans lancer de campagne.",
+    )
+    parser.add_argument(
+        "--list-presets", action="store_true",
+        help="Affiche la liste des présets de règles disponibles puis quitte sans lancer de campagne.",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Valide la configuration (GameConfig, profils, poids) et affiche le plan d'exécution sans lancer Ray.",
+    )
     args = parser.parse_args()
 
-    config = GameConfig(random_seed=args.seed, player_count=args.player_count)
+    if args.list_profiles:
+        print("Profils de siège disponibles :")
+        for profile in _ALL_SEAT_PROFILES:
+            trained_note = " (entraînable, nécessite --weights-path ou --seat-weights)" if profile in _TRAINED_AGENT_PROFILES else ""
+            print(f"  - {profile}{trained_note}")
+        return
 
-    initial_weights: Optional[np.ndarray] = None
-    rounds_already_trained = 0
-    if args.resume is not None:
-        initial_weights = np.load(args.resume)
-        metadata = naming.read_weights_metadata(args.resume)
-        if metadata is not None:
-            rounds_already_trained = int(metadata.get("rounds_trained", 0))
-        print(f"Reprise de l'entraînement depuis {args.resume} ({rounds_already_trained} manches déjà jouées).")
+    if args.list_presets:
+        print("Présets de règles disponibles :")
+        for preset_name in _RULE_PRESETS:
+            print(f"  - {preset_name}")
+        return
+
+    seat_profiles = (
+        [token.strip() for token in args.seat_profiles.split(",")] if args.seat_profiles else None
+    )
+    seat_weights: Optional[Dict[int, str]] = None
+    if args.seat_weights:
+        seat_weights = {}
+        for token in args.seat_weights.split(","):
+            pid_str, _, path = token.partition(":")
+            if path:
+                seat_weights[int(pid_str.strip())] = path.strip()
+
+    if args.dry_run:
+        try:
+            GameConfig(random_seed=args.seed, player_count=args.player_count, **_RULE_PRESETS[args.config_preset])
+        except ValueError as error:
+            print(f"Configuration invalide : {error}")
+            return
+        print("Configuration valide. Plan d'exécution :")
+        print(f"  Parties : {args.games}, joueurs : {args.player_count}, manches/partie : {args.rounds_per_game}")
+        print(f"  Profil uniforme : {args.agent_profile}" if not seat_profiles else f"  Profils de sièges : {seat_profiles}")
+        print(f"  Préset de règles : {args.config_preset}")
+        print(f"  Travailleurs Ray : {args.workers}")
+        return
 
     from checkpoint_utils import GracefulKiller
 
     killer = GracefulKiller()
-
-    trainee, running_vp = train(
-        config, args.rounds, args.learning_rate, args.opponent_pool,
-        initial_weights=initial_weights,
+    launch_research(
+        args.games, args.player_count, args.rounds_per_game,
+        args.agent_profile, args.workers, args.output, args.seed,
+        experiment_name=args.experiment_name,
+        config_overrides=_RULE_PRESETS[args.config_preset],
+        weights_path=args.weights_path,
+        seat_profiles=seat_profiles,
+        seat_weights=seat_weights,
         stop_check=lambda: killer.should_stop,
     )
-
-    total_rounds_trained = rounds_already_trained + len(running_vp)
-    if len(running_vp) < args.rounds:
-        print(f"Entraînement interrompu proprement après {len(running_vp)}/{args.rounds} manches ; relancer avec --resume pour continuer.")
-
-    output_path = args.output or naming.build_weights_filename(
-        model_name=args.model_name,
-        player_count=args.player_count,
-        learning_rate=args.learning_rate,
-        rounds=total_rounds_trained,
-    )
-    np.save(output_path, trainee.weights)
-    naming.write_weights_metadata(
-        output_path,
-        {
-            "model_name": args.model_name,
-            "player_count": args.player_count,
-            "learning_rate": args.learning_rate,
-            "rounds_trained": total_rounds_trained,
-            "opponent_pool": args.opponent_pool,
-            "seed": args.seed,
-            "resumed_from": args.resume,
-        },
-    )
-
-    history_path = naming.build_weights_metadata_filename(output_path).replace(".meta.json", ".history.csv")
-    with open(history_path, "w", encoding="utf-8") as handle:
-        handle.write("round_index,vp\n")
-        for index, vp in enumerate(running_vp):
-            handle.write(f"{rounds_already_trained + index},{vp}\n")
-
-    print(f"Poids sauvegardés dans {output_path}")
-    print(f"Historique d'entraînement sauvegardé dans {history_path}")
 
 
 if __name__ == "__main__":

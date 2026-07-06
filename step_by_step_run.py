@@ -5,22 +5,14 @@ Fournit un point d'entrée en ligne de commande interactif qui guide l'utilisate
 (nombre de joueurs, profils de sièges, règles actives, nombre de manches) puis affiche le déroulement complet de la partie manche par manche,
 avec la possibilité d'afficher à tout instant l'intégralité des mains de tous les joueurs, triées par ordre de rang.
 
-Le module dépend de `core.config`, `agents.*`, `engine.event_bus`, `engine.game_runner` et `events.*`.
+Le module dépend de `core.config`, `registry.agent_registry`, `engine.event_bus`, `engine.game_runner` et `events.*`.
 """
 
 from __future__ import annotations
 
-from typing import Callable, Dict, List, Tuple
+from typing import Dict, List, Tuple
 
-from agents.adaptive_bot import AdaptiveBot
-from agents.greedy_bot import GreedyBot
-from agents.human_agent import HumanAgent
 from agents.interface import AbstractBaseAgent
-from agents.lookahead_bot import LookaheadBot
-from agents.mcts_bot import MCTSBot
-from agents.random_bot import RandomBot
-from agents.rule_based_bot import RuleBasedBot
-from agents.scoring_bot import ScoringBot
 from core.config import (
     PASS_TYPE_ALLOW_SOFT, PASS_TYPE_HARD_ONLY, PENALTY_DRAW_CARDS,
     PENALTY_INSTANT_SCUM, ROLE_NEUTRAL, ROLE_PRESIDENT, ROLE_SCUM,
@@ -34,17 +26,9 @@ from events.structural import (
     EventTrickStart,
 )
 from events.transactional import EventActionPlayed, EventExchange, EventRuleTriggered
+from registry.agent_registry import HEURISTIC_AGENT_REGISTRY
 
-_AGENT_REGISTRY: Dict[str, Callable[[int, GameConfig], AbstractBaseAgent]] = {
-    "human_agent": HumanAgent,
-    "random_bot": RandomBot,
-    "greedy_bot": GreedyBot,
-    "rule_based_bot": RuleBasedBot,
-    "lookahead_bot": LookaheadBot,
-    "adaptive_bot": AdaptiveBot,
-    "scoring_bot": ScoringBot,
-    "mcts_bot": MCTSBot,
-}
+_AGENT_REGISTRY = HEURISTIC_AGENT_REGISTRY
 
 _VALID_ROLES = (ROLE_PRESIDENT, ROLE_VICE_PRESIDENT, ROLE_NEUTRAL, ROLE_VICE_SCUM, ROLE_SCUM)
 

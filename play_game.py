@@ -2,32 +2,23 @@
 Module du point d'entrée interactif de partie.
 
 Le module implémente `main`, le point d'entrée en ligne de commande permettant de jouer une partie complète en console, avec un siège
-humain optionnel et des sièges automatisés parmi les profils exposés par `_AGENT_REGISTRY`. Le module traduit l'intégralité des paramètres
-de `core.config.GameConfig` en options de ligne de commande et restitue, après chaque manche, un résumé des rôles et des points de victoire
-attribués.
+humain optionnel et des sièges automatisés parmi les profils exposés par le registre centralisé `registry.agent_registry`. Le module
+traduit l'intégralité des paramètres de `core.config.GameConfig` en options de ligne de commande et restitue, après chaque manche, un
+résumé des rôles et des points de victoire attribués.
 
-Le module dépend de `core.config`, `agents.interface`, `agents.human_agent`, `agents.random_bot`, `agents.greedy_bot`, `agents.rule_based_bot`,
-`agents.mcts_bot`, `engine.game_runner` et `engine.event_bus`.
+Le module dépend de `core.config`, `registry.agent_registry`, `engine.game_runner` et `engine.event_bus`.
 """
 
 from __future__ import annotations
 
 import argparse
-from typing import Callable, Dict
+from typing import Dict
 
 from rich.console import Console
 
 import console_theme
 
-from agents.adaptive_bot import AdaptiveBot
-from agents.greedy_bot import GreedyBot
-from agents.human_agent import HumanAgent
 from agents.interface import AbstractBaseAgent
-from agents.lookahead_bot import LookaheadBot
-from agents.mcts_bot import MCTSBot
-from agents.random_bot import RandomBot
-from agents.rule_based_bot import RuleBasedBot
-from agents.scoring_bot import ScoringBot
 from core.config import (
     PASS_TYPE_ALLOW_SOFT, PASS_TYPE_HARD_ONLY, PENALTY_DRAW_CARDS,
     PENALTY_INSTANT_SCUM, ROLE_NEUTRAL, ROLE_PRESIDENT, ROLE_SCUM,
@@ -36,53 +27,10 @@ from core.config import (
 )
 from engine.event_bus import EventBus
 from engine.game_runner import Game
-
-# Association entre nom de profil de siège et fabrique d'agent instanciable via `(player_id, config)`.
-# Chaque clé correspond exactement au nom du module Python définissant la classe d'agent (`agents/<clé>.py`).
-_AGENT_REGISTRY: Dict[str, Callable[[int, GameConfig], AbstractBaseAgent]] = {
-    "human_agent": HumanAgent,
-    "random_bot": RandomBot,
-    "greedy_bot": GreedyBot,
-    "rule_based_bot": RuleBasedBot,
-    "lookahead_bot": LookaheadBot,
-    "adaptive_bot": AdaptiveBot,
-    "scoring_bot": ScoringBot,
-    "mcts_bot": MCTSBot,
-}
-
-# Profils entraînables nécessitant le chargement optionnel d'un fichier de poids via `--weights`.
-_TRAINED_AGENT_PROFILES = ("rl_agent", "torch_rl_agent")
+from registry.agent_registry import ALL_SEAT_PROFILES, TRAINED_AGENT_PROFILES, build_agent
 
 # Rôles valides pour l'option --strict-remainder-role, cohérents avec GameConfig.strict_remainder_role.
 _VALID_ROLES = (ROLE_PRESIDENT, ROLE_VICE_PRESIDENT, ROLE_NEUTRAL, ROLE_VICE_SCUM, ROLE_SCUM)
-
-
-def _build_seat_agent(profile: str, pid: int, config: GameConfig, weights_path: str) -> AbstractBaseAgent:
-    """
-    Construit l'agent d'un unique siège, y compris pour les profils entraînables.
-
-    Paramètre `profile` : nom de profil, clé de `_AGENT_REGISTRY` ou de `_TRAINED_AGENT_PROFILES`.
-    Paramètre `pid` : identifiant du joueur occupant le siège.
-    Paramètre `config` : configuration de la partie.
-    Paramètre `weights_path` : chemin d'un fichier de poids entraîné, chaîne vide si absent, utilisé
-    uniquement pour les profils de `_TRAINED_AGENT_PROFILES`.
-    Retourne une instance de `AbstractBaseAgent`. Aucun effet de bord hors chargement disque des poids
-    éventuels.
-    """
-    if profile == "rl_agent":
-        import numpy as np
-        from agents.rl_agent import RLAgent
-
-        weights = np.load(weights_path) if weights_path else None
-        return RLAgent(pid, config, weights=weights, epsilon=0.0)
-    if profile == "torch_rl_agent":
-        from agents.torch_rl_agent import TorchRLAgent
-
-        trained = TorchRLAgent(player_id=pid, config=config, epsilon=0.0)
-        if weights_path:
-            trained.load_weights(weights_path)
-        return trained
-    return _AGENT_REGISTRY[profile](pid, config)
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -207,8 +155,8 @@ def _build_seat_profiles(seats_arg: str, player_count: int) -> list:
     Paramètre `seats_arg` : valeur brute de `--seats`, chaîne de profils séparés par des virgules, ou `None` si l'option est omise.
     Paramètre `player_count` : nombre de joueurs $N$, utilisé pour valider la taille de la liste et pour construire le profil par défaut.
     Retourne une liste de chaînes de profils, de taille `player_count`. Si `seats_arg` est `None`, le siège 0 reçoit le profil `'human_agent'`
-    et les sièges suivants reçoivent le profil `'greedy_bot'`. Lève `ValueError` si un profil est inconnu de `_AGENT_REGISTRY` et de
-    `_TRAINED_AGENT_PROFILES`, ou si le nombre de profils fournis diffère de `player_count`. Aucun effet de bord.
+    et les sièges suivants reçoivent le profil `'greedy_bot'`. Lève `ValueError` si un profil est inconnu du registre centralisé
+    (`registry.agent_registry.ALL_SEAT_PROFILES`), ou si le nombre de profils fournis diffère de `player_count`. Aucun effet de bord.
     """
     if seats_arg is None:
         return ["human_agent"] + ["greedy_bot"] * (player_count - 1)
@@ -218,7 +166,7 @@ def _build_seat_profiles(seats_arg: str, player_count: int) -> list:
         raise ValueError(
             f"--seats doit contenir exactement {player_count} profil(s), {len(profiles)} fourni(s)."
         )
-    valid_profiles = set(_AGENT_REGISTRY) | set(_TRAINED_AGENT_PROFILES)
+    valid_profiles = set(ALL_SEAT_PROFILES)
     for profile in profiles:
         if profile not in valid_profiles:
             raise ValueError(
@@ -261,10 +209,10 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.list_seats:
-        valid_profiles = sorted(set(_AGENT_REGISTRY) | set(_TRAINED_AGENT_PROFILES))
+        valid_profiles = sorted(set(ALL_SEAT_PROFILES))
         print("Profils de siège disponibles :")
         for profile in valid_profiles:
-            trained_note = " (entraînable, nécessite --weights ou --seat-weights)" if profile in _TRAINED_AGENT_PROFILES else ""
+            trained_note = " (entraînable, nécessite --weights ou --seat-weights)" if profile in TRAINED_AGENT_PROFILES else ""
             print(f"  - {profile}{trained_note}")
         return
 
@@ -287,7 +235,7 @@ def main() -> None:
         return ""
 
     agents: Dict[int, AbstractBaseAgent] = {
-        pid: _build_seat_agent(profile, pid, config, _resolve_weight_path(pid))
+        pid: build_agent(profile, pid, config, _resolve_weight_path(pid))
         for pid, profile in enumerate(seat_profiles)
     }
 

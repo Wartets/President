@@ -14,6 +14,12 @@ manches entraînées, combinaisons de balayage déjà testées) et sert de sourc
 (Ctrl+C, SIGTERM) est prise en compte entre deux unités de travail : le manifeste est sauvegardé avant de quitter, et le prochain lancement
 reprend exactement là où le précédent s'est arrêté plutôt que de recommencer les combinaisons déjà couvertes.
 
+Seules les étapes ne gérant pas déjà leur propre affichage de progression (entraînement linéaire, balayage de taux d'apprentissage)
+s'exécutent sous le tableau de bord partagé `ProgressManager` ; les étapes qui embarquent leur propre système de rendu (`tqdm` et
+`analytics.live_monitor.LiveMonitor` dans `research.run_simulation`/`research.evaluate_agent`, tableaux `rich` périodiques dans
+`training.trainer.Trainer`) s'exécutent en dehors de ce tableau de bord, deux instances `rich.live.Live` actives simultanément sur la même
+console produisant un affichage corrompu.
+
 Le module dépend de `core.config`, `naming`, `console_theme`, `progress_manager`, `checkpoint_utils`, `training.train_rl`,
 `training.trainer`, `training.launch_distributed`, `research.run_simulation`, `research.evaluate_agent` et `research.generate_graphs`.
 """
@@ -132,7 +138,7 @@ def _heuristic_profiles() -> List[str]:
     Détermine dynamiquement l'ensemble des profils heuristiques disponibles pour les campagnes de référence.
 
     Retourne la liste des clés de `research.run_simulation._AGENT_REGISTRY`, incluant automatiquement tout nouveau profil d'agent
-    heuristique enregistré, sans nécessiter de mise à jour manuelle de cette liste. Aucun effet de bord.
+    heuristique enregistré dans `registry.agent_registry`, sans nécessiter de mise à jour manuelle de cette liste. Aucun effet de bord.
     """
     from research.run_simulation import _AGENT_REGISTRY as heuristic_registry
 
@@ -188,6 +194,8 @@ def _train_linear_agent_incremental(
         initial_epsilon=initial_epsilon,
         stop_check=lambda: killer.should_stop,
         on_round=lambda index: progress.advance(task_id, 1),
+        use_internal_progress=False,
+        on_log=progress.log,
     )
     progress.complete_task(task_id, description=f"Entraînement linéaire p{player_count} — terminé")
 
@@ -284,7 +292,10 @@ def _sweep_learning_rates_incremental(
             progress.log("[yellow]Arrêt demandé, balayage interrompu proprement.[/yellow]")
             break
         config = GameConfig(random_seed=seed + seed_offset, player_count=player_count)
-        _trainee, running_vp = train(config, rounds_per_run, learning_rate=learning_rate, opponent_pool="mixed")
+        _trainee, running_vp = train(
+            config, rounds_per_run, learning_rate=learning_rate, opponent_pool="mixed",
+            use_internal_progress=False,
+        )
         tail = running_vp[-max(1, len(running_vp) // 20):] if running_vp else []
         new_rows.append({
             "player_count": player_count,
@@ -322,7 +333,6 @@ def _attempt_distributed_training_incremental(
     steps_increment: int,
     redis_host: str,
     redis_port: int,
-    progress: ProgressManager,
 ) -> Dict[str, Any]:
     """
     Continue (ou démarre) l'entraînement distribué de l'agent neuronal pour chaque nombre de joueurs de la grille, si Redis est joignable.
@@ -331,19 +341,20 @@ def _attempt_distributed_training_incremental(
     Paramètre `player_counts` : nombres de joueurs à couvrir.
     Paramètre `steps_increment` : nombre d'étapes de gradient supplémentaires par nombre de joueurs.
     Paramètre `redis_host`, `redis_port` : coordonnées du serveur Redis à tester.
-    Paramètre `progress` : gestionnaire de barres de progression partagé.
     Retourne un dictionnaire résumant, par nombre de joueurs, si l'entraînement a été exécuté et à partir de quels poids repris. Effet de
     bord : si Redis est joignable, exécute un entraînement distribué complet par nombre de joueurs, en reprenant les poids existants
-    plutôt que d'en repartir de zéro.
+    plutôt que d'en repartir de zéro. Écrit sur la sortie standard via la console partagée du module, en dehors de tout tableau de bord
+    `ProgressManager`, puisque `training.trainer.Trainer` affiche lui-même des tableaux `rich` périodiques pendant l'entraînement.
     """
     from training.launch_distributed import launch
     from training.replay_buffer import RedisReplayBuffer
 
     probe = RedisReplayBuffer(host=redis_host, port=redis_port)
     if not probe.ping():
-        progress.log(
-            f"[yellow]Redis non joignable sur {redis_host}:{redis_port}, entraînement neuronal distribué ignoré pour cette exécution."
-            "[/yellow]"
+        _console.print(
+            console_theme.warning_text(
+                f"Redis non joignable sur {redis_host}:{redis_port}, entraînement neuronal distribué ignoré pour cette exécution."
+            )
         )
         return {"executed": False, "reason": "Redis non joignable."}
 
@@ -352,9 +363,11 @@ def _attempt_distributed_training_incremental(
         key = _model_key("pipeline_torch_rl_weights", player_count)
         existing = manifest["models"].get(key)
         resume_path = existing.get("latest_weights_path") if existing and os.path.exists(existing.get("latest_weights_path", "")) else None
-        progress.log(
-            f"[cyan]Modèle neuronal p{player_count}[/cyan] : "
-            + (f"reprise depuis {resume_path}." if resume_path else "démarrage d'un nouveau modèle.")
+        _console.print(
+            console_theme.info_text(
+                f"Modèle neuronal p{player_count} : "
+                + (f"reprise depuis {resume_path}." if resume_path else "démarrage d'un nouveau modèle.")
+            )
         )
         launch(
             num_workers=max(1, os.cpu_count() or 1),
@@ -388,7 +401,6 @@ def _simulate_baselines_incremental(
     rounds_per_game: int,
     seed_base: int,
     killer: GracefulKiller,
-    progress: ProgressManager,
 ) -> Dict[str, Any]:
     """
     Ajoute `games_increment` parties nouvelles pour chaque combinaison (joueurs, profil, préset de règles) de la grille.
@@ -399,18 +411,18 @@ def _simulate_baselines_incremental(
     Paramètre `rounds_per_game` : nombre de manches par partie.
     Paramètre `seed_base` : graine de base, chaque combinaison dérivant sa propre plage de graines cumulative.
     Paramètre `killer` : indicateur d'arrêt propre, consulté entre deux combinaisons.
-    Paramètre `progress` : gestionnaire de barres de progression partagé.
     Retourne un dictionnaire résumant, par combinaison, le nombre total de parties désormais couvertes et le dernier fichier Parquet
     produit. Effet de bord : lance une campagne Ray par combinaison non interrompue, écrivant systématiquement un nouveau fichier
-    Parquet distinct plutôt que d'écraser les segments déjà produits par des lancements antérieurs.
+    Parquet distinct plutôt que d'écraser les segments déjà produits par des lancements antérieurs. La progression de chaque campagne est
+    affichée par `research.run_simulation.launch_research` elle-même (`tqdm` + `LiveMonitor`), en dehors de tout tableau de bord
+    `ProgressManager` englobant.
     """
     from research.run_simulation import launch_research
 
     results: Dict[str, Any] = {}
-    task_id = progress.add_task("Simulations de référence (grille)", total=len(combos))
-    for player_count, profile, preset in combos:
+    for combo_index, (player_count, profile, preset) in enumerate(combos):
         if killer.should_stop:
-            progress.log("[yellow]Arrêt demandé, simulations de référence interrompues proprement.[/yellow]")
+            _console.print(console_theme.warning_text("Arrêt demandé, simulations de référence interrompues proprement."))
             break
         key = _baseline_key(player_count, profile, preset)
         coverage = manifest["baseline_coverage"].get(key, {"games_done": 0, "seed_cursor": seed_base, "parquet_paths": []})
@@ -426,9 +438,11 @@ def _simulate_baselines_incremental(
                 f"pipeline_baseline_{preset}", player_count, profile, effective_games, rounds_per_game,
             )
         )
-        progress.log(
-            f"[blue]› Baseline p{player_count} / {profile} / {preset}[/blue] : +{effective_games} parties "
-            f"(total après cette exécution : {coverage['games_done'] + effective_games})"
+        _console.print(
+            console_theme.info_text(
+                f"Baseline {combo_index + 1}/{len(combos)} — p{player_count} / {profile} / {preset} : "
+                f"+{effective_games} parties (total après cette exécution : {coverage['games_done'] + effective_games})"
+            )
         )
         launch_research(
             total_games=effective_games,
@@ -449,8 +463,6 @@ def _simulate_baselines_incremental(
         coverage.setdefault("parquet_paths", []).append(output_path)
         manifest["baseline_coverage"][key] = coverage
         results[key] = coverage
-        progress.advance(task_id, 1, description=f"Baseline p{player_count}/{profile}/{preset} — terminée")
-    progress.complete_task(task_id, description="Simulations de référence (grille) — terminées")
     return results
 
 
@@ -462,7 +474,6 @@ def _evaluate_trained_agent_incremental(
     seed_base: int,
     profiles: List[str],
     killer: GracefulKiller,
-    progress: ProgressManager,
 ) -> Dict[str, Any]:
     """
     Ajoute `games_increment` parties d'évaluation nouvelles pour chaque combinaison (joueurs, préset de règles) de la grille.
@@ -474,19 +485,18 @@ def _evaluate_trained_agent_incremental(
     Paramètre `seed_base` : graine de base.
     Paramètre `profiles` : profils heuristiques disponibles pour occuper les sièges adverses.
     Paramètre `killer` : indicateur d'arrêt propre.
-    Paramètre `progress` : gestionnaire de barres de progression partagé.
     Retourne un dictionnaire résumant la couverture par combinaison. Effet de bord : lance une campagne Ray par combinaison, en utilisant
     systématiquement le modèle linéaire le plus récemment entraîné pour le nombre de joueurs concerné, et en écrivant un nouveau fichier
-    CSV distinct à chaque appel plutôt que d'écraser les résultats antérieurs.
+    CSV distinct à chaque appel plutôt que d'écraser les résultats antérieurs. La progression de chaque campagne est affichée par
+    `research.evaluate_agent.launch_evaluation` elle-même, en dehors de tout tableau de bord `ProgressManager` englobant.
     """
     from research.evaluate_agent import launch_evaluation
     from research.run_simulation import _RULE_PRESETS
 
     results: Dict[str, Any] = {}
-    task_id = progress.add_task("Évaluations comparatives (grille)", total=len(combos))
-    for player_count, preset in combos:
+    for combo_index, (player_count, preset) in enumerate(combos):
         if killer.should_stop:
-            progress.log("[yellow]Arrêt demandé, évaluations comparatives interrompues proprement.[/yellow]")
+            _console.print(console_theme.warning_text("Arrêt demandé, évaluations comparatives interrompues proprement."))
             break
         model_key = _model_key("pipeline_rl_weights", player_count)
         trained_weights_path = manifest["models"].get(model_key, {}).get("latest_weights_path")
@@ -504,7 +514,11 @@ def _evaluate_trained_agent_incremental(
                 f"pipeline_evaluation_{preset}", player_count, "rl_agent", games_increment, rounds_per_game, extension="csv",
             )
         )
-        progress.log(f"[blue]› Évaluation p{player_count} / {preset}[/blue] : +{games_increment} parties")
+        _console.print(
+            console_theme.info_text(
+                f"Évaluation {combo_index + 1}/{len(combos)} — p{player_count} / {preset} : +{games_increment} parties"
+            )
+        )
         launch_evaluation(
             total_games=games_increment,
             seat_profiles=seat_profiles,
@@ -522,8 +536,6 @@ def _evaluate_trained_agent_incremental(
         coverage.setdefault("csv_paths", []).append(output_csv)
         manifest["evaluation_coverage"][key] = coverage
         results[key] = coverage
-        progress.advance(task_id, 1, description=f"Évaluation p{player_count}/{preset} — terminée")
-    progress.complete_task(task_id, description="Évaluations comparatives (grille) — terminées")
     return results
 
 
@@ -587,7 +599,8 @@ def _print_manifest_summary(manifest: Dict[str, Any]) -> None:
     Affiche un tableau récapitulatif complet de la couverture cumulée du pipeline.
 
     Paramètre `manifest` : manifeste cumulatif complet.
-    Retourne `None`. Effet de bord : écrit plusieurs tableaux `rich` sur la sortie standard.
+    Retourne `None`. Effet de bord : écrit plusieurs tableaux `rich` sur la sortie standard. Appelée uniquement après la fermeture de tout
+    tableau de bord `ProgressManager`/`Live` actif, garantissant un rendu correct.
     """
     models_table = Table(title=f"[{console_theme.STYLE_STEP}]Modèles entraînés[/{console_theme.STYLE_STEP}]")
     models_table.add_column("Modèle")
@@ -642,6 +655,9 @@ def run_pipeline(
     Paramètre `skip_distributed` : si vrai, n'essaie même pas de joindre Redis pour cette itération.
     Retourne `None`. Effet de bord : exécute toutes les étapes ci-dessus, sauvegarde le manifeste après chacune (résistant à une
     interruption brutale entre deux étapes), régénère les graphiques (nouvelle version) et le rapport final, puis affiche un résumé complet.
+    Le tableau de bord `ProgressManager` n'est actif que pour l'entraînement linéaire et le balayage de taux d'apprentissage ; il est
+    explicitement refermé avant les étapes gérant leur propre affichage de progression (entraînement distribué, simulations de référence,
+    évaluations comparatives).
     """
     manifest = _load_manifest()
     killer = GracefulKiller()
@@ -655,8 +671,8 @@ def run_pipeline(
     ]
     evaluation_combos = list(itertools.product(player_counts, rule_presets))
 
-    with ProgressManager(console=_console) as progress:
-        try:
+    try:
+        with ProgressManager(console=_console) as progress:
             for player_count in player_counts:
                 if killer.should_stop:
                     break
@@ -669,35 +685,37 @@ def run_pipeline(
                 )
                 _save_manifest(manifest)
 
-            if not killer.should_stop and not skip_distributed:
-                _attempt_distributed_training_incremental(
-                    manifest, player_counts, distributed_steps_increment, redis_host, redis_port, progress,
-                )
-                _save_manifest(manifest)
+        # Le tableau de bord ci-dessus est refermé avant toute étape qui gère son propre affichage de progression.
 
-            if not killer.should_stop:
-                _simulate_baselines_incremental(
-                    manifest, baseline_profile_combos, baseline_games_increment, baseline_rounds_per_game,
-                    seed + 10_000, killer, progress,
-                )
-                _save_manifest(manifest)
+        if not killer.should_stop and not skip_distributed:
+            _attempt_distributed_training_incremental(
+                manifest, player_counts, distributed_steps_increment, redis_host, redis_port,
+            )
+            _save_manifest(manifest)
 
-            if not killer.should_stop:
-                _evaluate_trained_agent_incremental(
-                    manifest, evaluation_combos, evaluation_games_increment, evaluation_rounds_per_game,
-                    seed + 20_000, profiles, killer, progress,
-                )
-                _save_manifest(manifest)
-        except Exception:  # noqa: BLE001 - on journalise puis on sauvegarde tout de même l'état accumulé
-            progress.log(console_theme.error_text(f"Erreur durant le pipeline :\n{traceback.format_exc()}"))
-        finally:
-            import ray
+        if not killer.should_stop:
+            _simulate_baselines_incremental(
+                manifest, baseline_profile_combos, baseline_games_increment, baseline_rounds_per_game,
+                seed + 10_000, killer,
+            )
+            _save_manifest(manifest)
 
-            try:
-                if ray.is_initialized():
-                    ray.shutdown()
-            except Exception:
-                pass
+        if not killer.should_stop:
+            _evaluate_trained_agent_incremental(
+                manifest, evaluation_combos, evaluation_games_increment, evaluation_rounds_per_game,
+                seed + 20_000, profiles, killer,
+            )
+            _save_manifest(manifest)
+    except Exception:  # noqa: BLE001 - on journalise puis on sauvegarde tout de même l'état accumulé
+        _console.print(console_theme.error_text(f"Erreur durant le pipeline :\n{traceback.format_exc()}"))
+    finally:
+        import ray
+
+        try:
+            if ray.is_initialized():
+                ray.shutdown()
+        except Exception:
+            pass
 
     figures_version: Optional[int] = None
     if not killer.should_stop:
