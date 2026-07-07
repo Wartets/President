@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Le Président — Interface de jeu</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+
+    <section id="screen-config" class="screen active">
+        <h1>Le Président</h1>
+        <p class="subtitle">Configurez une partie et affrontez les bots.</p>
+
+        <p id="config-error" class="error-text"></p>
+
+        <div class="config-grid">
+            <div class="config-block">
+                <label for="player-count">Nombre de joueurs</label>
+                <input type="number" id="player-count" min="3" max="8" value="4">
+            </div>
+            <div class="config-block">
+                <label for="rounds-count">Nombre de manches</label>
+                <input type="number" id="rounds-count" min="1" max="500" value="10">
+            </div>
+            <div class="config-block checkbox-block">
+                <label><input type="checkbox" id="reveal-hands"> Révéler les mains de tous les joueurs</label>
+            </div>
+        </div>
+
+        <h2>Sièges</h2>
+        <div id="seats-container" class="seats-container"></div>
+
+        <details class="rules-details">
+            <summary>Règles avancées</summary>
+            <div class="rules-grid">
+                <label><input type="checkbox" id="rule-straights"> Suites</label>
+                <label><input type="checkbox" id="rule-double-revolution"> Double Révolution</label>
+                <label><input type="checkbox" id="rule-skip-turn"> Saut de Tour</label>
+                <label><input type="checkbox" id="rule-interception"> Interception</label>
+                <label><input type="checkbox" id="rule-putsch"> Putsch</label>
+                <label><input type="checkbox" id="rule-blind-tax"> Taxe Aveugle</label>
+                <label><input type="checkbox" id="rule-finish-penalty"> Pénalité de sortie étendue</label>
+                <label><input type="checkbox" id="rule-skip-on-equal"> Forçage par égalité</label>
+                <label><input type="checkbox" id="rule-allow-soft-pass"> Passe souple</label>
+                <label class="select-label">
+                    Barème de points de victoire
+                    <select id="rule-vp-distribution">
+                        <option value="SYMMETRICAL" selected>Symétrique</option>
+                        <option value="LINEAR">Linéaire</option>
+                        <option value="LEGACY_STEPPED">Historique</option>
+                    </select>
+                </label>
+            </div>
+        </details>
+
+        <button id="start-game-btn" class="primary-btn">Démarrer la partie</button>
+    </section>
+
+    <section id="screen-game" class="screen">
+        <header class="game-header">
+            <div class="game-header-left">
+                <span id="round-indicator" class="badge">Manche —</span>
+                <span id="trick-indicator" class="badge">Pli —</span>
+                <span id="revolution-indicator" class="badge revolution hidden">Révolution active</span>
+                <span id="finished-indicator" class="badge success hidden">Partie terminée</span>
+            </div>
+            <div class="game-header-right">
+                <button id="new-game-btn" class="secondary-btn">Nouvelle partie</button>
+            </div>
+        </header>
+
+        <div id="table" class="table"></div>
+
+        <div class="current-trick-panel">
+            <h3>Pli en cours</h3>
+            <div id="current-trick-cards" class="trick-cards"></div>
+        </div>
+
+        <div id="action-panels" class="action-panels"></div>
+
+        <div class="log-panel">
+            <h3>Journal de la partie</h3>
+            <div id="log-feed" class="log-feed"></div>
+        </div>
+    </section>
+
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
