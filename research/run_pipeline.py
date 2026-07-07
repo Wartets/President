@@ -1,27 +1,34 @@
 """
 Module du pipeline automatique complet de recherche.
 
-Le module orchestre, sans intervention humaine, une campagne de recherche incrémentale : entraînement continu (jamais recommencé de zéro
-tant que des poids existent déjà) de l'agent linéaire et de l'agent neuronal distribué, balayage de taux d'apprentissage étendu à chaque
-lancement plutôt que rejoué à l'identique, simulations de référence et évaluations comparatives couvrant une grille de configurations
-(plusieurs nombres de joueurs croisés avec plusieurs présets de règles), génération versionnée des graphiques, puis rédaction d'un rapport
-de synthèse relisant l'intégralité des données accumulées sur tous les lancements précédents.
+Le module orchestre, sans intervention humaine, une campagne de recherche incrémentale et adaptative : entraînement continu (jamais
+recommencé de zéro tant que des poids existent déjà) de l'agent linéaire et de l'agent neuronal distribué, balayage étendu d'hyperparamètres
+(taux d'apprentissage croisé avec le pool d'adversaires) avec sélection automatique de la meilleure combinaison observée par nombre de
+joueurs, réinjectée dans les sessions d'entraînement continu suivantes plutôt que de conserver un taux fixe arbitraire, simulations de
+référence dont l'ordre de traitement est reprioritisé à chaque lancement en faveur des combinaisons les moins couvertes, recherche
+combinatoire multi-configurations sur le produit cartésien profils/joueurs/présets, tournoi direct entre la politique linéaire et la
+politique neuronale entraînées pour un même nombre de joueurs avec désignation d'un champion courant, vérification statistique automatisée
+d'un ensemble de propriétés générales attendues du moteur de règles sur une partie fraîche et jetable, évaluations comparatives du modèle
+linéaire contre les profils heuristiques, génération versionnée des graphiques, puis rédaction d'un rapport de synthèse relisant
+l'intégralité des données accumulées sur tous les lancements précédents.
 
 Contrairement à une exécution "tout ou rien", chaque lancement du pipeline ajoute du travail neuf (nouvelles parties, nouvelles manches
-d'entraînement, nouvelles combinaisons de la grille) par-dessus ce qui a déjà été calculé lors des lancements précédents, sans jamais
-recalculer ni écraser une donnée déjà acquise : le fichier `data/pipeline_manifest.json` conserve la couverture cumulée (parties simulées,
-manches entraînées, combinaisons de balayage déjà testées) et sert de source de vérité entre deux lancements. Une interruption brutale
+d'entraînement, nouvelles combinaisons de balayage, nouvelles itérations combinatoires, nouveaux tournois) par-dessus ce qui a déjà été
+calculé lors des lancements précédents, sans jamais recalculer ni écraser une donnée déjà acquise : le fichier
+`data/pipeline_manifest.json` conserve la couverture cumulée et sert de source de vérité entre deux lancements. Une interruption brutale
 (Ctrl+C, SIGTERM) est prise en compte entre deux unités de travail : le manifeste est sauvegardé avant de quitter, et le prochain lancement
 reprend exactement là où le précédent s'est arrêté plutôt que de recommencer les combinaisons déjà couvertes.
 
-Seules les étapes ne gérant pas déjà leur propre affichage de progression (entraînement linéaire, balayage de taux d'apprentissage)
-s'exécutent sous le tableau de bord partagé `ProgressManager` ; les étapes qui embarquent leur propre système de rendu (`tqdm` et
-`analytics.live_monitor.LiveMonitor` dans `research.run_simulation`/`research.evaluate_agent`, tableaux `rich` périodiques dans
-`training.trainer.Trainer`) s'exécutent en dehors de ce tableau de bord, deux instances `rich.live.Live` actives simultanément sur la même
-console produisant un affichage corrompu.
+Seules les étapes ne gérant pas déjà leur propre affichage de progression (entraînement linéaire, balayage d'hyperparamètres, sélection des
+meilleurs hyperparamètres) s'exécutent sous le tableau de bord partagé `ProgressManager` ; les étapes qui embarquent leur propre système de
+rendu (`tqdm` et `analytics.live_monitor.LiveMonitor` dans `research.run_simulation`/`research.evaluate_agent`/`research.run_combinatory`,
+tableaux `rich` périodiques dans `training.trainer.Trainer`) s'exécutent en dehors de ce tableau de bord, deux instances `rich.live.Live`
+actives simultanément sur la même console produisant un affichage corrompu.
 
-Le module dépend de `core.config`, `naming`, `console_theme`, `progress_manager`, `checkpoint_utils`, `training.train_rl`,
-`training.trainer`, `training.launch_distributed`, `research.run_simulation`, `research.evaluate_agent` et `research.generate_graphs`.
+Le module dépend de `core.config`, `naming`, `console_theme`, `progress_manager`, `checkpoint_utils`, `agents.greedy_bot`,
+`analytics.event_logger`, `analytics.metrics_calc`, `engine.event_bus`, `engine.game_runner`, `events.structural`, `training.train_rl`,
+`training.trainer`, `training.launch_distributed`, `research.run_simulation`, `research.run_combinatory`, `research.evaluate_agent` et
+`research.generate_graphs`.
 """
 
 from __future__ import annotations
@@ -42,8 +49,18 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 import console_theme
 import naming
+from agents.greedy_bot import GreedyBot
+from analytics.event_logger import EventLogger
+from analytics.metrics_calc import (
+    action_space_entropy, branching_factor_average, gini_initial_hand_power,
+    role_transition_matrix, sub_optimal_pass_rate, trick_length_average,
+)
 from checkpoint_utils import GracefulKiller, atomic_write_json, load_json
 from core.config import GameConfig
+from core.math_utils import f_std
+from engine.event_bus import EventBus
+from engine.game_runner import Game
+from events.structural import EventRoundStart
 from progress_manager import ProgressManager
 
 _MANIFEST_PATH = os.path.join("data", "pipeline_manifest.json")
@@ -61,6 +78,9 @@ _PROGRESS_CHUNK_SIZE = 5
 _EPSILON_DECAY = 0.995
 _EPSILON_MIN = 0.02
 _EPSILON_START = 0.3
+
+# Paramètres par défaut de la vérification statistique automatisée du moteur de règles.
+_VALIDATION_PLAYER_COUNT = 4
 
 
 def _unique_path(path: str) -> str:
@@ -90,12 +110,16 @@ def _load_manifest() -> Dict[str, Any]:
     Retourne un dictionnaire de manifeste. Aucun effet de bord.
     """
     default = {
-        "schema_version": 2,
+        "schema_version": 3,
         "runs": [],
         "models": {},
         "baseline_coverage": {},
         "evaluation_coverage": {},
         "lr_sweep_coverage": {"combos_done": [], "output_csv": None},
+        "best_hyperparameters": {},
+        "combinatorial_coverage": {},
+        "tournament_results": {},
+        "validation_results": {},
         "graph_versions": {"next": 1},
     }
     loaded = load_json(_MANIFEST_PATH, default=None)
@@ -129,8 +153,8 @@ def _eval_key(player_count: int, preset: str) -> str:
     return f"p{player_count}|{preset}"
 
 
-def _lr_combo_key(player_count: int, learning_rate: float, seed_offset: int) -> str:
-    return f"p{player_count}|lr{learning_rate:g}|s{seed_offset}"
+def _lr_combo_key(player_count: int, learning_rate: float, opponent_pool: str, seed_offset: int) -> str:
+    return f"p{player_count}|lr{learning_rate:g}|op{opponent_pool}|s{seed_offset}"
 
 
 def _heuristic_profiles() -> List[str]:
@@ -143,6 +167,26 @@ def _heuristic_profiles() -> List[str]:
     from research.run_simulation import _AGENT_REGISTRY as heuristic_registry
 
     return list(heuristic_registry.keys())
+
+
+def _prioritize_baseline_combos(
+    manifest: Dict[str, Any], combos: List[Tuple[int, str, str]],
+) -> List[Tuple[int, str, str]]:
+    """
+    Trie les combinaisons de référence par couverture cumulée croissante.
+
+    Paramètre `manifest` : manifeste cumulatif, consulté pour la couverture déjà accumulée par combinaison.
+    Paramètre `combos` : liste de combinaisons `(player_count, profile, rule_preset)` à ordonner.
+    Retourne la même liste triée par nombre de parties déjà simulées croissant, garantissant qu'une combinaison encore peu couverte
+    (par exemple un profil ou un préset ajouté récemment à la grille) rattrape prioritairement son retard plutôt que de laisser la
+    grille progresser uniquement dans l'ordre d'énumération d'origine. Aucun effet de bord.
+    """
+    def _coverage(combo: Tuple[int, str, str]) -> int:
+        player_count, profile, preset = combo
+        key = _baseline_key(player_count, profile, preset)
+        return int(manifest["baseline_coverage"].get(key, {}).get("games_done", 0))
+
+    return sorted(combos, key=_coverage)
 
 
 def _train_linear_agent_incremental(
@@ -163,13 +207,18 @@ def _train_linear_agent_incremental(
     Paramètre `killer` : indicateur d'arrêt propre, transmis à la boucle d'entraînement pour permettre un arrêt entre deux manches.
     Paramètre `progress` : gestionnaire de barres de progression partagé.
     Retourne un dictionnaire décrivant l'état du modèle après cette session (chemin des poids, manches totales entraînées cumulées,
-    VP moyen récent). Effet de bord : écrit un nouveau fichier de poids et une entrée d'historique étendue, jamais un fichier de poids
-    déjà existant.
+    VP moyen récent, hyperparamètres utilisés). Effet de bord : écrit un nouveau fichier de poids et une entrée d'historique étendue,
+    jamais un fichier de poids déjà existant. Si le balayage d'hyperparamètres a déjà désigné une meilleure combinaison
+    (taux d'apprentissage, pool d'adversaires) pour ce nombre de joueurs, celle-ci est utilisée à la place des valeurs par défaut.
     """
     from training.train_rl import train
 
     key = _model_key("pipeline_rl_weights", player_count)
     existing = manifest["models"].get(key)
+
+    best_hyperparams = manifest.get("best_hyperparameters", {}).get(str(player_count), {})
+    learning_rate = float(best_hyperparams.get("learning_rate", 0.01))
+    opponent_pool = str(best_hyperparams.get("opponent_pool", "mixed"))
 
     initial_weights: Optional[np.ndarray] = None
     rounds_already = 0
@@ -178,9 +227,15 @@ def _train_linear_agent_incremental(
         initial_weights = np.load(existing["latest_weights_path"])
         rounds_already = int(existing.get("rounds_trained_total", 0))
         history_path = existing.get("history_path")
-        progress.log(f"[cyan]Modèle linéaire p{player_count}[/cyan] : reprise à {rounds_already} manches déjà entraînées.")
+        progress.log(
+            f"[cyan]Modèle linéaire p{player_count}[/cyan] : reprise à {rounds_already} manches déjà entraînées "
+            f"(lr={learning_rate:g}, pool={opponent_pool})."
+        )
     else:
-        progress.log(f"[cyan]Modèle linéaire p{player_count}[/cyan] : aucun poids existant, création d'un nouveau modèle.")
+        progress.log(
+            f"[cyan]Modèle linéaire p{player_count}[/cyan] : aucun poids existant, création d'un nouveau modèle "
+            f"(lr={learning_rate:g}, pool={opponent_pool})."
+        )
 
     initial_epsilon = max(_EPSILON_MIN, _EPSILON_START * (_EPSILON_DECAY ** rounds_already))
     config = GameConfig(random_seed=seed, player_count=player_count)
@@ -189,7 +244,8 @@ def _train_linear_agent_incremental(
     trainee, running_vp = train(
         config,
         rounds_increment,
-        opponent_pool="mixed",
+        learning_rate=learning_rate,
+        opponent_pool=opponent_pool,
         initial_weights=initial_weights,
         initial_epsilon=initial_epsilon,
         stop_check=lambda: killer.should_stop,
@@ -203,7 +259,7 @@ def _train_linear_agent_incremental(
     total_rounds = rounds_already + rounds_executed
 
     output_path = naming.build_weights_filename(
-        model_name="pipeline_rl_weights", player_count=player_count, learning_rate=0.01, rounds=total_rounds,
+        model_name="pipeline_rl_weights", player_count=player_count, learning_rate=learning_rate, rounds=total_rounds,
     )
     np.save(output_path, trainee.weights)
     naming.write_weights_metadata(
@@ -211,9 +267,9 @@ def _train_linear_agent_incremental(
         {
             "model_name": "pipeline_rl_weights",
             "player_count": player_count,
-            "learning_rate": 0.01,
+            "learning_rate": learning_rate,
             "rounds_trained": total_rounds,
-            "opponent_pool": "mixed",
+            "opponent_pool": opponent_pool,
             "seed": seed,
         },
     )
@@ -228,36 +284,47 @@ def _train_linear_agent_incremental(
             handle.write(f"{rounds_already + offset},{vp}\n")
 
     tail = running_vp[-max(1, len(running_vp) // 20):] if running_vp else []
+    head_window = running_vp[: max(1, len(running_vp) // 20)] if running_vp else []
+    convergence_gap: Optional[float] = None
+    if tail and head_window:
+        convergence_gap = float(sum(tail) / len(tail) - sum(head_window) / len(head_window))
+
     result = {
         "latest_weights_path": output_path,
         "rounds_trained_total": total_rounds,
         "history_path": history_path,
         "final_vp_mean": float(sum(tail) / len(tail)) if tail else existing.get("final_vp_mean", 0.0) if existing else 0.0,
         "rounds_executed_this_run": rounds_executed,
+        "learning_rate_used": learning_rate,
+        "opponent_pool_used": opponent_pool,
+        "convergence_gap_this_run": convergence_gap,
     }
     manifest["models"][key] = result
     return result
 
 
-def _sweep_learning_rates_incremental(
+def _sweep_hyperparameters_incremental(
     manifest: Dict[str, Any],
     player_counts: List[int],
     rounds_per_run: int,
     seed: int,
     learning_rates: List[float],
-    seeds_per_lr: int,
+    opponent_pools: List[str],
+    seeds_per_combo: int,
     killer: GracefulKiller,
     progress: ProgressManager,
 ) -> Dict[str, Any]:
     """
-    Étend le balayage de taux d'apprentissage avec toute combinaison (joueurs, taux, répétition) non encore couverte.
+    Étend le balayage d'hyperparamètres (taux d'apprentissage croisé avec le pool d'adversaires) avec toute combinaison
+    (joueurs, taux, pool, répétition) non encore couverte.
 
     Paramètre `manifest` : manifeste cumulatif, mis à jour en place avec les combinaisons désormais couvertes.
     Paramètre `player_counts` : nombres de joueurs à couvrir.
     Paramètre `rounds_per_run` : nombre de manches d'entraînement par exécution individuelle.
     Paramètre `seed` : graine de base.
     Paramètre `learning_rates` : taux d'apprentissage testés.
-    Paramètre `seeds_per_lr` : nombre de répétitions indépendantes par taux d'apprentissage et par nombre de joueurs.
+    Paramètre `opponent_pools` : pools d'adversaires testés (`'greedy'`, `'rule_based'`, `'mixed'`).
+    Paramètre `seeds_per_combo` : nombre de répétitions indépendantes par combinaison.
     Paramètre `killer` : indicateur d'arrêt propre, consulté entre deux combinaisons.
     Paramètre `progress` : gestionnaire de barres de progression partagé.
     Retourne un dictionnaire portant le chemin du fichier CSV cumulatif et le nombre de nouvelles combinaisons ajoutées lors de cet appel.
@@ -272,45 +339,50 @@ def _sweep_learning_rates_incremental(
     output_csv = coverage.get("output_csv") or os.path.join("data", "learning_rate_sweep.csv")
     naming.ensure_dir("data")
 
-    all_combos: List[Tuple[int, float, int]] = [
-        (pc, lr, seed_offset)
+    all_combos: List[Tuple[int, float, str, int]] = [
+        (pc, lr, pool, seed_offset)
         for pc in player_counts
         for lr in learning_rates
-        for seed_offset in range(max(1, seeds_per_lr))
+        for pool in opponent_pools
+        for seed_offset in range(max(1, seeds_per_combo))
     ]
     pending_combos = [c for c in all_combos if _lr_combo_key(*c) not in combos_done]
 
     if not pending_combos:
-        progress.log("[cyan]Balayage des taux d'apprentissage[/cyan] : toutes les combinaisons demandées sont déjà couvertes.")
+        progress.log("[cyan]Balayage d'hyperparamètres[/cyan] : toutes les combinaisons demandées sont déjà couvertes.")
         return {"output_csv": output_csv, "new_combos": 0}
 
-    task_id = progress.add_task("Balayage des taux d'apprentissage", total=len(pending_combos))
+    task_id = progress.add_task("Balayage d'hyperparamètres", total=len(pending_combos))
     new_rows: List[Dict[str, Any]] = []
     added = 0
-    for player_count, learning_rate, seed_offset in pending_combos:
+    for player_count, learning_rate, opponent_pool, seed_offset in pending_combos:
         if killer.should_stop:
             progress.log("[yellow]Arrêt demandé, balayage interrompu proprement.[/yellow]")
             break
         config = GameConfig(random_seed=seed + seed_offset, player_count=player_count)
         _trainee, running_vp = train(
-            config, rounds_per_run, learning_rate=learning_rate, opponent_pool="mixed",
+            config, rounds_per_run, learning_rate=learning_rate, opponent_pool=opponent_pool,
             use_internal_progress=False,
         )
         tail = running_vp[-max(1, len(running_vp) // 20):] if running_vp else []
         new_rows.append({
             "player_count": player_count,
             "learning_rate": learning_rate,
+            "opponent_pool": opponent_pool,
             "seed_index": seed_offset,
             "final_vp_mean": float(sum(tail) / len(tail)) if tail else 0.0,
             "rounds": rounds_per_run,
         })
-        combos_done.add(_lr_combo_key(player_count, learning_rate, seed_offset))
+        combos_done.add(_lr_combo_key(player_count, learning_rate, opponent_pool, seed_offset))
         added += 1
         progress.advance(
             task_id, 1,
-            description=f"Balayage — p{player_count}, lr={learning_rate:g}, répétition {seed_offset + 1}/{seeds_per_lr}",
+            description=(
+                f"Balayage — p{player_count}, lr={learning_rate:g}, pool={opponent_pool}, "
+                f"répétition {seed_offset + 1}/{seeds_per_combo}"
+            ),
         )
-    progress.complete_task(task_id, description="Balayage des taux d'apprentissage — terminé")
+    progress.complete_task(task_id, description="Balayage d'hyperparamètres — terminé")
 
     if new_rows:
         new_frame = pl.DataFrame(new_rows)
@@ -325,6 +397,53 @@ def _sweep_learning_rates_incremental(
     coverage["output_csv"] = output_csv
     manifest["lr_sweep_coverage"] = coverage
     return {"output_csv": output_csv, "new_combos": added}
+
+
+def _select_best_hyperparameters(
+    manifest: Dict[str, Any], player_counts: List[int], progress: ProgressManager,
+) -> Dict[str, Any]:
+    """
+    Détermine, pour chaque nombre de joueurs, la combinaison (taux d'apprentissage, pool d'adversaires) au VP moyen final le plus élevé
+    parmi l'ensemble des résultats accumulés du balayage d'hyperparamètres.
+
+    Paramètre `manifest` : manifeste cumulatif, mis à jour en place avec la sélection courante.
+    Paramètre `player_counts` : nombres de joueurs à couvrir.
+    Paramètre `progress` : gestionnaire de barres de progression partagé, utilisé uniquement pour journaliser la sélection retenue.
+    Retourne le dictionnaire de sélection par nombre de joueurs. N'a aucun effet si le fichier CSV du balayage n'existe pas encore ou ne
+    couvre aucun nombre de joueurs demandé. Effet de bord : remplace `manifest["best_hyperparameters"]`.
+    """
+    coverage = manifest.get("lr_sweep_coverage", {})
+    output_csv = coverage.get("output_csv")
+    if not output_csv or not os.path.exists(output_csv):
+        return manifest.get("best_hyperparameters", {})
+
+    import polars as pl
+
+    frame = pl.read_csv(output_csv)
+    best_by_player: Dict[str, Any] = dict(manifest.get("best_hyperparameters", {}))
+    for player_count in player_counts:
+        subset = frame.filter(pl.col("player_count") == player_count)
+        if subset.is_empty():
+            continue
+        grouped = (
+            subset.group_by(["learning_rate", "opponent_pool"])
+            .agg(pl.col("final_vp_mean").mean().alias("mean_final_vp"))
+            .sort("mean_final_vp", descending=True)
+        )
+        if grouped.is_empty():
+            continue
+        top = grouped.row(0, named=True)
+        best_by_player[str(player_count)] = {
+            "learning_rate": float(top["learning_rate"]),
+            "opponent_pool": str(top["opponent_pool"]),
+            "mean_final_vp": float(top["mean_final_vp"]),
+        }
+        progress.log(
+            f"[cyan]Meilleure combinaison p{player_count}[/cyan] : lr={top['learning_rate']:g}, "
+            f"pool={top['opponent_pool']}, VP moyen final = {top['mean_final_vp']:.3f}"
+        )
+    manifest["best_hyperparameters"] = best_by_player
+    return best_by_player
 
 
 def _attempt_distributed_training_incremental(
@@ -343,8 +462,7 @@ def _attempt_distributed_training_incremental(
     Paramètre `redis_host`, `redis_port` : coordonnées du serveur Redis à tester.
     Retourne un dictionnaire résumant, par nombre de joueurs, si l'entraînement a été exécuté et à partir de quels poids repris. Effet de
     bord : si Redis est joignable, exécute un entraînement distribué complet par nombre de joueurs, en reprenant les poids existants
-    plutôt que d'en repartir de zéro. Écrit sur la sortie standard via la console partagée du module, en dehors de tout tableau de bord
-    `ProgressManager`, puisque `training.trainer.Trainer` affiche lui-même des tableaux `rich` périodiques pendant l'entraînement.
+    plutôt que d'en repartir de zéro.
     """
     from training.launch_distributed import launch
     from training.replay_buffer import RedisReplayBuffer
@@ -406,16 +524,14 @@ def _simulate_baselines_incremental(
     Ajoute `games_increment` parties nouvelles pour chaque combinaison (joueurs, profil, préset de règles) de la grille.
 
     Paramètre `manifest` : manifeste cumulatif, mis à jour en place avec la couverture étendue par combinaison.
-    Paramètre `combos` : liste de tuples `(player_count, profile, rule_preset)` à couvrir.
+    Paramètre `combos` : liste de tuples `(player_count, profile, rule_preset)` à couvrir, déjà réordonnée par priorité de couverture.
     Paramètre `games_increment` : nombre de parties supplémentaires par combinaison lors de cet appel.
     Paramètre `rounds_per_game` : nombre de manches par partie.
     Paramètre `seed_base` : graine de base, chaque combinaison dérivant sa propre plage de graines cumulative.
     Paramètre `killer` : indicateur d'arrêt propre, consulté entre deux combinaisons.
     Retourne un dictionnaire résumant, par combinaison, le nombre total de parties désormais couvertes et le dernier fichier Parquet
     produit. Effet de bord : lance une campagne Ray par combinaison non interrompue, écrivant systématiquement un nouveau fichier
-    Parquet distinct plutôt que d'écraser les segments déjà produits par des lancements antérieurs. La progression de chaque campagne est
-    affichée par `research.run_simulation.launch_research` elle-même (`tqdm` + `LiveMonitor`), en dehors de tout tableau de bord
-    `ProgressManager` englobant.
+    Parquet distinct plutôt que d'écraser les segments déjà produits par des lancements antérieurs.
     """
     from research.run_simulation import launch_research
 
@@ -487,8 +603,7 @@ def _evaluate_trained_agent_incremental(
     Paramètre `killer` : indicateur d'arrêt propre.
     Retourne un dictionnaire résumant la couverture par combinaison. Effet de bord : lance une campagne Ray par combinaison, en utilisant
     systématiquement le modèle linéaire le plus récemment entraîné pour le nombre de joueurs concerné, et en écrivant un nouveau fichier
-    CSV distinct à chaque appel plutôt que d'écraser les résultats antérieurs. La progression de chaque campagne est affichée par
-    `research.evaluate_agent.launch_evaluation` elle-même, en dehors de tout tableau de bord `ProgressManager` englobant.
+    CSV distinct à chaque appel plutôt que d'écraser les résultats antérieurs.
     """
     from research.evaluate_agent import launch_evaluation
     from research.run_simulation import _RULE_PRESETS
@@ -539,6 +654,249 @@ def _evaluate_trained_agent_incremental(
     return results
 
 
+def _run_combinatorial_search_incremental(
+    manifest: Dict[str, Any],
+    player_counts: List[int],
+    rule_presets: List[str],
+    profiles: List[str],
+    games_per_combo: int,
+    rounds_per_game_values: List[int],
+    seed: int,
+    run_index: int,
+    killer: GracefulKiller,
+) -> Optional[str]:
+    """
+    Lance une itération de recherche combinatoire sur le produit cartésien des profils heuristiques, nombres de joueurs, présets de
+    règles et durées de partie couverts par la grille courante.
+
+    Paramètre `manifest` : manifeste cumulatif, mis à jour en place avec le chemin du dernier manifeste combinatoire produit.
+    Paramètre `player_counts` : nombres de joueurs couverts par la grille combinatoire.
+    Paramètre `rule_presets` : présets de règles couverts.
+    Paramètre `profiles` : profils heuristiques uniformes testés.
+    Paramètre `games_per_combo` : nombre de parties simulées par combinaison individuelle.
+    Paramètre `rounds_per_game_values` : nombres de manches par partie testés.
+    Paramètre `seed` : graine de base de cette itération.
+    Paramètre `run_index` : index du lancement de pipeline courant, utilisé pour distinguer le nom d'expérience d'une itération à l'autre.
+    Paramètre `killer` : indicateur d'arrêt propre, consulté avant le lancement.
+    Retourne le chemin du fichier manifeste CSV agrégé produit, ou `None` si l'exécution a été sautée (arrêt demandé). Effet de bord :
+    exécute une campagne par combinaison du produit cartésien, écrit un nouveau manifeste CSV distinct à chaque itération de pipeline
+    plutôt que d'écraser les précédents.
+    """
+    if killer.should_stop:
+        return None
+
+    from research.run_combinatory import run_grid
+
+    experiment_name = f"pipeline_combinatorial_run{run_index}"
+    _console.print(
+        console_theme.info_text(
+            f"Recherche combinatoire — {len(profiles)} profils x {len(player_counts)} tailles x "
+            f"{len(rule_presets)} présets x {len(rounds_per_game_values)} durées, {games_per_combo} parties/combo"
+        )
+    )
+    manifest_path = run_grid(
+        experiment_name=experiment_name,
+        agent_profiles=profiles,
+        player_counts=player_counts,
+        rule_presets=rule_presets,
+        rounds_per_game_values=rounds_per_game_values,
+        games_per_combo=games_per_combo,
+        num_workers=max(1, os.cpu_count() or 1),
+        base_seed=seed,
+    )
+    combinatorial_coverage = manifest.get("combinatorial_coverage", {})
+    combinatorial_coverage.setdefault("manifest_paths", []).append(manifest_path)
+    combinatorial_coverage["latest_manifest_path"] = manifest_path
+    manifest["combinatorial_coverage"] = combinatorial_coverage
+    return manifest_path
+
+
+def _run_tournament_incremental(
+    manifest: Dict[str, Any],
+    player_counts: List[int],
+    rounds_per_game: int,
+    games: int,
+    seed_base: int,
+    profiles: List[str],
+    killer: GracefulKiller,
+) -> Dict[str, Any]:
+    """
+    Confronte directement, pour chaque nombre de joueurs disposant à la fois d'un modèle linéaire et d'un modèle neuronal entraînés, les
+    deux politiques sur les mêmes sièges adverses fixes, et désigne le modèle au VP cumulé moyen le plus élevé comme champion courant
+    pour ce nombre de joueurs.
+
+    Paramètre `manifest` : manifeste cumulatif, consulté pour les chemins de poids les plus récents et mis à jour en place avec le
+    résultat du tournoi.
+    Paramètre `player_counts` : nombres de joueurs à couvrir.
+    Paramètre `rounds_per_game` : nombre de manches par partie de confrontation.
+    Paramètre `games` : nombre de parties de confrontation par nombre de joueurs.
+    Paramètre `seed_base` : graine de base.
+    Paramètre `profiles` : profils heuristiques disponibles pour occuper les sièges de remplissage.
+    Paramètre `killer` : indicateur d'arrêt propre.
+    Retourne un dictionnaire résumant, par nombre de joueurs, le champion désigné et le VP cumulé moyen de chaque modèle. Effet de bord :
+    lance une campagne par nombre de joueurs couvert, écrit un nouveau fichier CSV distinct par confrontation. Un nombre de joueurs sans
+    modèle linéaire et sans modèle neuronal disponibles simultanément est ignoré.
+    """
+    from research.evaluate_agent import launch_evaluation
+
+    results: Dict[str, Any] = {}
+    for player_count in player_counts:
+        if killer.should_stop:
+            break
+        if player_count < 3:
+            continue
+
+        linear_key = _model_key("pipeline_rl_weights", player_count)
+        neural_key = _model_key("pipeline_torch_rl_weights", player_count)
+        linear_info = manifest["models"].get(linear_key)
+        neural_info = manifest["models"].get(neural_key)
+        linear_path = linear_info.get("latest_weights_path") if linear_info else None
+        neural_path = neural_info.get("latest_weights_path") if neural_info else None
+
+        if not linear_path or not os.path.exists(linear_path):
+            continue
+        if not neural_path or not os.path.exists(neural_path):
+            continue
+
+        filler = list(profiles[: max(0, player_count - 2)])
+        while len(filler) < max(0, player_count - 2):
+            filler.append(profiles[0] if profiles else "greedy_bot")
+        seat_profiles = ["rl_agent", "torch_rl_agent"] + filler
+        seat_profiles = seat_profiles[:player_count]
+        seat_weights = {0: linear_path, 1: neural_path}
+
+        output_csv = _unique_path(
+            naming.build_research_filename(
+                "pipeline_tournament", player_count, "rl_vs_torch", games, rounds_per_game, extension="csv",
+            )
+        )
+        _console.print(
+            console_theme.info_text(f"Tournoi p{player_count} — rl_agent vs torch_rl_agent : {games} parties")
+        )
+        launch_evaluation(
+            total_games=games,
+            seat_profiles=seat_profiles,
+            rounds_per_game=rounds_per_game,
+            num_workers=max(1, os.cpu_count() or 1),
+            base_seed=seed_base + player_count,
+            experiment_name="pipeline_tournament",
+            seat_weights=seat_weights,
+            output_csv=output_csv,
+            shutdown_ray=False,
+        )
+
+        import polars as pl
+
+        frame = pl.read_csv(output_csv)
+        summary = (
+            frame.filter(pl.col("profile").is_in(["rl_agent", "torch_rl_agent"]))
+            .group_by("profile")
+            .agg(pl.col("cumulative_vp").mean().alias("mean_cumulative_vp"))
+        )
+        scores = {row["profile"]: float(row["mean_cumulative_vp"]) for row in summary.to_dicts()}
+        champion = max(scores, key=scores.get) if scores else None
+        results[str(player_count)] = {
+            "scores": scores,
+            "champion": champion,
+            "output_csv": output_csv,
+        }
+    manifest["tournament_results"] = {**manifest.get("tournament_results", {}), **results}
+    return results
+
+
+def _run_statistical_validation(
+    seed: int,
+    killer: GracefulKiller,
+    round_count: int,
+    player_count: int = _VALIDATION_PLAYER_COUNT,
+) -> Dict[str, Any]:
+    """
+    Exécute une série de manches déterministes fraîches et vérifie un ensemble de propriétés statistiques générales attendues du moteur
+    de règles : bornes de l'indice de Gini de la puissance de main initiale, somme des lignes de la matrice de transition de rôles,
+    absence de passe sous-optimal pour un agent glouton déterministe, positivité du facteur de branchement et de l'entropie de l'espace
+    d'action, et borne de la longueur moyenne d'un pli sous passe strict.
+
+    Paramètre `seed` : graine de reproductibilité de cette série de vérification.
+    Paramètre `killer` : indicateur d'arrêt propre, consulté entre deux manches.
+    Paramètre `round_count` : nombre de manches simulées pour cette vérification.
+    Paramètre `player_count` : nombre de joueurs de la partie de vérification.
+    Retourne un dictionnaire `{nom_de_vérification: {"passed": bool, "value": ..., "detail": str}}`. Effet de bord : simule localement
+    une partie complète jetable, sans écriture sur disque.
+    """
+    config = GameConfig(random_seed=seed, player_count=player_count)
+    agents = {pid: GreedyBot(pid, config) for pid in range(player_count)}
+    logger = EventLogger()
+    bus = EventBus()
+    bus.subscribe(logger)
+    game = Game(config, agents, event_bus=bus, game_id="pipeline-validation")
+
+    role_sequence: List[Dict[int, str]] = []
+    for _ in range(round_count):
+        if killer.should_stop:
+            break
+        game.play_round()
+        role_sequence.append(dict(game.roles or {}))
+
+    checks: Dict[str, Any] = {}
+
+    gini_values: List[float] = []
+    for round_start in logger.events_of_type(EventRoundStart):
+        hand_powers = {
+            pid: float(sum(f_std(c) for c in cards if c.rank.value != "JOKER"))
+            for pid, cards in round_start.initial_hands.items()
+        }
+        gini_values.append(gini_initial_hand_power(hand_powers))
+    gini_mean = (sum(gini_values) / len(gini_values)) if gini_values else None
+    checks["gini_within_bounds"] = {
+        "passed": gini_mean is not None and 0.0 <= gini_mean < 1.0,
+        "value": gini_mean,
+        "detail": "Indice de Gini moyen de la puissance de main initiale, domaine attendu [0, 1[.",
+    }
+
+    suboptimal_rates = {pid: sub_optimal_pass_rate(logger, pid) for pid in range(player_count)}
+    all_zero = all(rate == 0.0 for rate in suboptimal_rates.values())
+    checks["greedy_never_suboptimal"] = {
+        "passed": all_zero,
+        "value": suboptimal_rates,
+        "detail": "Un agent glouton déterministe ne doit jamais produire de passe sous-optimal.",
+    }
+
+    matrix = role_transition_matrix(role_sequence)
+    row_sums: Dict[str, float] = {}
+    for role_a in {role for role, _ in matrix.keys()}:
+        row_sums[role_a] = sum(prob for (ra, _rb), prob in matrix.items() if ra == role_a)
+    rows_ok = all(abs(total - 1.0) < 1e-9 for total in row_sums.values())
+    checks["role_transition_rows_sum_to_one"] = {
+        "passed": rows_ok,
+        "value": row_sums,
+        "detail": "Chaque ligne non vide de la matrice de transition de rôles doit sommer à 1.",
+    }
+
+    branching = branching_factor_average(logger)
+    checks["branching_factor_positive"] = {
+        "passed": branching > 0.0,
+        "value": branching,
+        "detail": "Le facteur de branchement moyen doit être strictement positif sur une partie non triviale.",
+    }
+
+    entropy = action_space_entropy(logger)
+    checks["action_space_entropy_non_negative"] = {
+        "passed": entropy >= 0.0,
+        "value": entropy,
+        "detail": "L'entropie de Shannon de l'espace d'action est par construction positive ou nulle.",
+    }
+
+    trick_length = trick_length_average(logger)
+    checks["trick_length_bounded_under_hard_pass"] = {
+        "passed": trick_length <= player_count + 1e-9,
+        "value": trick_length,
+        "detail": "Sous pass_type=HARD_ONLY, la longueur moyenne d'un pli est bornée par le nombre de joueurs.",
+    }
+
+    logger.close()
+    return checks
+
+
 def _generate_final_report(manifest: Dict[str, Any], figures_version: Optional[int]) -> str:
     """
     Rédige un rapport de synthèse relisant l'intégralité du manifeste cumulatif.
@@ -559,14 +917,28 @@ def _generate_final_report(manifest: Dict[str, Any], figures_version: Optional[i
         lines.append(
             f"- `{key}` : {info.get('rounds_trained_total', '?')} manches/étapes cumulées, "
             f"poids `{info.get('latest_weights_path', 'indisponible')}`, "
-            f"VP moyen récent : {info.get('final_vp_mean', 'n/a')}"
+            f"VP moyen récent : {info.get('final_vp_mean', 'n/a')}, "
+            f"taux d'apprentissage utilisé : {info.get('learning_rate_used', 'n/a')}, "
+            f"pool d'adversaires : {info.get('opponent_pool_used', 'n/a')}"
         )
     lines.append("")
 
-    lines.append("## Balayage des taux d'apprentissage")
+    lines.append("## Meilleurs hyperparamètres identifiés par balayage")
+    best_hyperparams = manifest.get("best_hyperparameters", {})
+    if best_hyperparams:
+        for player_count_key, info in sorted(best_hyperparams.items(), key=lambda kv: int(kv[0])):
+            lines.append(
+                f"- {player_count_key} joueurs : taux d'apprentissage = {info['learning_rate']:g}, "
+                f"pool d'adversaires = {info['opponent_pool']}, VP moyen final = {info['mean_final_vp']:.3f}"
+            )
+    else:
+        lines.append("- Aucune combinaison encore sélectionnée (balayage non exécuté ou insuffisant).")
+    lines.append("")
+
+    lines.append("## Balayage d'hyperparamètres")
     lr_coverage = manifest.get("lr_sweep_coverage", {})
     lines.append(f"- Fichier CSV cumulatif : `{lr_coverage.get('output_csv', 'indisponible')}`")
-    lines.append(f"- Combinaisons (joueurs, taux, répétition) couvertes à ce jour : {len(lr_coverage.get('combos_done', []))}")
+    lines.append(f"- Combinaisons (joueurs, taux, pool, répétition) couvertes à ce jour : {len(lr_coverage.get('combos_done', []))}")
     lines.append("")
 
     lines.append("## Couverture des simulations de référence")
@@ -577,6 +949,39 @@ def _generate_final_report(manifest: Dict[str, Any], figures_version: Optional[i
     lines.append("## Couverture des évaluations comparatives")
     for key, coverage in sorted(manifest["evaluation_coverage"].items()):
         lines.append(f"- `{key}` : {coverage.get('games_done', 0)} parties cumulées sur {len(coverage.get('csv_paths', []))} fichier(s)")
+    lines.append("")
+
+    lines.append("## Recherche combinatoire")
+    combinatorial_coverage = manifest.get("combinatorial_coverage", {})
+    if combinatorial_coverage.get("latest_manifest_path"):
+        lines.append(f"- Dernier manifeste combinatoire : `{combinatorial_coverage['latest_manifest_path']}`")
+        lines.append(f"- Nombre total d'itérations combinatoires exécutées : {len(combinatorial_coverage.get('manifest_paths', []))}")
+    else:
+        lines.append("- Aucune itération de recherche combinatoire encore exécutée.")
+    lines.append("")
+
+    lines.append("## Tournoi (politique linéaire contre politique neuronale)")
+    tournament_results = manifest.get("tournament_results", {})
+    if tournament_results:
+        for player_count_key, info in sorted(tournament_results.items(), key=lambda kv: int(kv[0])):
+            scores_text = ", ".join(f"{profile} = {score:.3f}" for profile, score in info.get("scores", {}).items())
+            lines.append(f"- {player_count_key} joueurs : champion = `{info.get('champion', 'n/a')}` ({scores_text})")
+    else:
+        lines.append(
+            "- Aucun tournoi encore exécuté (nécessite un modèle linéaire et un modèle neuronal entraînés pour un même nombre de joueurs)."
+        )
+    lines.append("")
+
+    lines.append("## Vérification statistique du moteur de règles")
+    validation = manifest.get("validation_results", {})
+    if validation:
+        overall = "toutes réussies" if validation.get("all_passed") else "au moins un échec"
+        lines.append(f"- Résultat global (lancement #{validation.get('run_index', '?')}) : {overall}")
+        for check_name, check_info in validation.get("checks", {}).items():
+            status = "OK" if check_info.get("passed") else "ÉCHEC"
+            lines.append(f"  - [{status}] `{check_name}` : {check_info.get('detail', '')} (valeur observée : {check_info.get('value')})")
+    else:
+        lines.append("- Aucune vérification statistique encore exécutée.")
     lines.append("")
 
     lines.append("## Graphiques")
@@ -620,6 +1025,31 @@ def _print_manifest_summary(manifest: Dict[str, Any]) -> None:
         coverage_table.add_row(key, "évaluation", str(coverage.get("games_done", 0)))
     _console.print(coverage_table)
 
+    tournament_results = manifest.get("tournament_results", {})
+    if tournament_results:
+        tournament_table = Table(title=f"[{console_theme.STYLE_STEP}]Tournoi linéaire vs neuronal[/{console_theme.STYLE_STEP}]")
+        tournament_table.add_column("Joueurs")
+        tournament_table.add_column("Champion")
+        tournament_table.add_column("Scores")
+        for key, info in sorted(tournament_results.items(), key=lambda kv: int(kv[0])):
+            scores_text = ", ".join(f"{profile}={score:.2f}" for profile, score in info.get("scores", {}).items())
+            tournament_table.add_row(key, str(info.get("champion", "n/a")), scores_text)
+        _console.print(tournament_table)
+
+    validation = manifest.get("validation_results", {})
+    if validation:
+        validation_table = Table(title=f"[{console_theme.STYLE_STEP}]Vérification statistique[/{console_theme.STYLE_STEP}]")
+        validation_table.add_column("Vérification")
+        validation_table.add_column("Statut")
+        for check_name, check_info in validation.get("checks", {}).items():
+            status = (
+                f"[{console_theme.STYLE_SUCCESS}]OK[/{console_theme.STYLE_SUCCESS}]"
+                if check_info.get("passed")
+                else f"[{console_theme.STYLE_ERROR}]ÉCHEC[/{console_theme.STYLE_ERROR}]"
+            )
+            validation_table.add_row(check_name, status)
+        _console.print(validation_table)
+
 
 def run_pipeline(
     player_counts: List[int],
@@ -628,15 +1058,24 @@ def run_pipeline(
     lr_sweep_rounds: int,
     lr_sweep_seeds: int,
     learning_rates: List[float],
+    opponent_pools: List[str],
     distributed_steps_increment: int,
     baseline_games_increment: int,
     baseline_rounds_per_game: int,
     evaluation_games_increment: int,
     evaluation_rounds_per_game: int,
+    combinatorial_games_per_combo: int,
+    combinatorial_rounds_per_game_values: List[int],
+    tournament_games: int,
+    tournament_rounds_per_game: int,
+    validation_round_count: int,
     seed: int,
     redis_host: str,
     redis_port: int,
     skip_distributed: bool,
+    skip_combinatorial: bool,
+    skip_tournament: bool,
+    skip_validation: bool,
 ) -> None:
     """
     Exécute une itération incrémentale complète du pipeline de recherche sur toute une grille de configurations.
@@ -644,31 +1083,36 @@ def run_pipeline(
     Paramètre `player_counts` : nombres de joueurs couverts par la grille d'analyse.
     Paramètre `rule_presets` : présets de règles couverts par la grille d'analyse.
     Paramètre `training_rounds_increment` : manches d'entraînement supplémentaires ajoutées à chaque modèle linéaire lors de cet appel.
-    Paramètre `lr_sweep_rounds`, `lr_sweep_seeds`, `learning_rates` : paramètres du balayage de taux d'apprentissage.
+    Paramètre `lr_sweep_rounds`, `lr_sweep_seeds`, `learning_rates`, `opponent_pools` : paramètres du balayage d'hyperparamètres.
     Paramètre `distributed_steps_increment` : étapes de gradient supplémentaires ajoutées à chaque modèle neuronal, si Redis est joignable.
     Paramètre `baseline_games_increment` : parties supplémentaires ajoutées à chaque combinaison de référence.
     Paramètre `baseline_rounds_per_game` : manches par partie de référence.
     Paramètre `evaluation_games_increment` : parties supplémentaires ajoutées à chaque combinaison d'évaluation.
     Paramètre `evaluation_rounds_per_game` : manches par partie d'évaluation.
+    Paramètre `combinatorial_games_per_combo`, `combinatorial_rounds_per_game_values` : paramètres de la recherche combinatoire.
+    Paramètre `tournament_games`, `tournament_rounds_per_game` : paramètres du tournoi linéaire contre neuronal.
+    Paramètre `validation_round_count` : nombre de manches simulées pour la vérification statistique automatisée.
     Paramètre `seed` : graine de base de cette itération.
     Paramètre `redis_host`, `redis_port` : coordonnées Redis pour l'entraînement distribué.
     Paramètre `skip_distributed` : si vrai, n'essaie même pas de joindre Redis pour cette itération.
+    Paramètre `skip_combinatorial` : si vrai, saute l'étape de recherche combinatoire.
+    Paramètre `skip_tournament` : si vrai, saute l'étape de tournoi linéaire contre neuronal.
+    Paramètre `skip_validation` : si vrai, saute l'étape de vérification statistique automatisée.
     Retourne `None`. Effet de bord : exécute toutes les étapes ci-dessus, sauvegarde le manifeste après chacune (résistant à une
     interruption brutale entre deux étapes), régénère les graphiques (nouvelle version) et le rapport final, puis affiche un résumé complet.
-    Le tableau de bord `ProgressManager` n'est actif que pour l'entraînement linéaire et le balayage de taux d'apprentissage ; il est
-    explicitement refermé avant les étapes gérant leur propre affichage de progression (entraînement distribué, simulations de référence,
-    évaluations comparatives).
     """
     manifest = _load_manifest()
     killer = GracefulKiller()
     profiles = _heuristic_profiles()
     run_started_at = time.time()
+    run_index = len(manifest["runs"]) + 1
 
     baseline_profile_combos = [
         (pc, profile, "base") for pc in player_counts for profile in profiles
     ] + [
         (pc, "rule_based_bot", preset) for pc in player_counts for preset in rule_presets if preset != "base"
     ]
+    baseline_profile_combos = _prioritize_baseline_combos(manifest, baseline_profile_combos)
     evaluation_combos = list(itertools.product(player_counts, rule_presets))
 
     try:
@@ -680,9 +1124,14 @@ def run_pipeline(
                 _save_manifest(manifest)
 
             if not killer.should_stop:
-                _sweep_learning_rates_incremental(
-                    manifest, player_counts, lr_sweep_rounds, seed + 5_000, learning_rates, lr_sweep_seeds, killer, progress,
+                _sweep_hyperparameters_incremental(
+                    manifest, player_counts, lr_sweep_rounds, seed + 5_000, learning_rates, opponent_pools,
+                    lr_sweep_seeds, killer, progress,
                 )
+                _save_manifest(manifest)
+
+            if not killer.should_stop:
+                _select_best_hyperparameters(manifest, player_counts, progress)
                 _save_manifest(manifest)
 
         # Le tableau de bord ci-dessus est refermé avant toute étape qui gère son propre affichage de progression.
@@ -705,6 +1154,30 @@ def run_pipeline(
                 manifest, evaluation_combos, evaluation_games_increment, evaluation_rounds_per_game,
                 seed + 20_000, profiles, killer,
             )
+            _save_manifest(manifest)
+
+        if not killer.should_stop and not skip_combinatorial:
+            _run_combinatorial_search_incremental(
+                manifest, player_counts, rule_presets, profiles, combinatorial_games_per_combo,
+                combinatorial_rounds_per_game_values, seed + 30_000, run_index, killer,
+            )
+            _save_manifest(manifest)
+
+        if not killer.should_stop and not skip_tournament:
+            _run_tournament_incremental(
+                manifest, player_counts, tournament_rounds_per_game, tournament_games,
+                seed + 40_000, profiles, killer,
+            )
+            _save_manifest(manifest)
+
+        if not killer.should_stop and not skip_validation:
+            _console.print(console_theme.info_text("Vérification statistique du moteur de règles…"))
+            validation_results = _run_statistical_validation(seed + 50_000, killer, round_count=validation_round_count)
+            manifest["validation_results"] = {
+                "run_index": run_index,
+                "checks": validation_results,
+                "all_passed": all(check["passed"] for check in validation_results.values()),
+            }
             _save_manifest(manifest)
     except Exception:  # noqa: BLE001 - on journalise puis on sauvegarde tout de même l'état accumulé
         _console.print(console_theme.error_text(f"Erreur durant le pipeline :\n{traceback.format_exc()}"))
@@ -764,12 +1237,21 @@ def main() -> None:
     parser.add_argument("--lr-sweep-rounds", type=int, default=300)
     parser.add_argument("--lr-sweep-seeds", type=int, default=3)
     parser.add_argument("--learning-rates", type=str, default="0.001,0.003,0.01,0.03,0.1")
+    parser.add_argument("--opponent-pools", type=str, default="greedy,rule_based,mixed")
     parser.add_argument("--distributed-steps-increment", type=int, default=200)
     parser.add_argument("--skip-distributed", action="store_true")
     parser.add_argument("--baseline-games-increment", type=int, default=60)
     parser.add_argument("--baseline-rounds-per-game", type=int, default=10)
     parser.add_argument("--evaluation-games-increment", type=int, default=60)
     parser.add_argument("--evaluation-rounds-per-game", type=int, default=20)
+    parser.add_argument("--combinatorial-games-per-combo", type=int, default=15)
+    parser.add_argument("--combinatorial-rounds-per-game-values", type=str, default="10,30")
+    parser.add_argument("--skip-combinatorial", action="store_true")
+    parser.add_argument("--tournament-games", type=int, default=40)
+    parser.add_argument("--tournament-rounds-per-game", type=int, default=20)
+    parser.add_argument("--skip-tournament", action="store_true")
+    parser.add_argument("--validation-rounds", type=int, default=40)
+    parser.add_argument("--skip-validation", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--redis-host", type=str, default="localhost")
     parser.add_argument("--redis-port", type=int, default=6379)
@@ -787,6 +1269,10 @@ def main() -> None:
     player_counts = [int(token.strip()) for token in args.player_counts.split(",") if token.strip()]
     rule_presets = [token.strip() for token in args.rule_presets.split(",") if token.strip()]
     learning_rates = [float(token.strip()) for token in args.learning_rates.split(",") if token.strip()]
+    opponent_pools = [token.strip() for token in args.opponent_pools.split(",") if token.strip()]
+    combinatorial_rounds_per_game_values = [
+        int(token.strip()) for token in args.combinatorial_rounds_per_game_values.split(",") if token.strip()
+    ]
 
     training_rounds_increment = args.training_rounds_increment
     lr_sweep_rounds = args.lr_sweep_rounds
@@ -794,6 +1280,9 @@ def main() -> None:
     distributed_steps_increment = args.distributed_steps_increment
     baseline_games_increment = args.baseline_games_increment
     evaluation_games_increment = args.evaluation_games_increment
+    combinatorial_games_per_combo = args.combinatorial_games_per_combo
+    tournament_games = args.tournament_games
+    validation_round_count = args.validation_rounds
 
     if args.quick:
         training_rounds_increment = min(training_rounds_increment, 80)
@@ -802,8 +1291,14 @@ def main() -> None:
         distributed_steps_increment = min(distributed_steps_increment, 20)
         baseline_games_increment = min(baseline_games_increment, 8)
         evaluation_games_increment = min(evaluation_games_increment, 8)
+        combinatorial_games_per_combo = min(combinatorial_games_per_combo, 3)
+        combinatorial_rounds_per_game_values = combinatorial_rounds_per_game_values[:1] or [5]
+        tournament_games = min(tournament_games, 6)
+        validation_round_count = min(validation_round_count, 10)
         player_counts = player_counts[:1]
         rule_presets = rule_presets[:2]
+        opponent_pools = opponent_pools[:1] or ["mixed"]
+        learning_rates = learning_rates[:2] or [0.01]
         _console.print(console_theme.warning_text("Mode --quick actif : volumes de travail fortement réduits."))
 
     run_pipeline(
@@ -813,15 +1308,24 @@ def main() -> None:
         lr_sweep_rounds=lr_sweep_rounds,
         lr_sweep_seeds=lr_sweep_seeds,
         learning_rates=learning_rates,
+        opponent_pools=opponent_pools,
         distributed_steps_increment=distributed_steps_increment,
         baseline_games_increment=baseline_games_increment,
         baseline_rounds_per_game=args.baseline_rounds_per_game,
         evaluation_games_increment=evaluation_games_increment,
         evaluation_rounds_per_game=args.evaluation_rounds_per_game,
+        combinatorial_games_per_combo=combinatorial_games_per_combo,
+        combinatorial_rounds_per_game_values=combinatorial_rounds_per_game_values,
+        tournament_games=tournament_games,
+        tournament_rounds_per_game=args.tournament_rounds_per_game,
+        validation_round_count=validation_round_count,
         seed=args.seed,
         redis_host=args.redis_host,
         redis_port=args.redis_port,
         skip_distributed=args.skip_distributed,
+        skip_combinatorial=args.skip_combinatorial,
+        skip_tournament=args.skip_tournament,
+        skip_validation=args.skip_validation,
     )
 
 
