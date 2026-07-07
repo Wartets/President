@@ -12,7 +12,7 @@ Le module dépend de `agents.interface`, de l'ensemble des modules `agents.*` d�
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple, Type
+from typing import Callable, Dict, Optional, Tuple
 
 from agents.adaptive_bot import AdaptiveBot
 from agents.aggressive_bot import AggressiveBot
@@ -30,7 +30,7 @@ from core.config import GameConfig
 # Association complète entre nom de profil et classe d'agent instanciable via `(player_id, config)`, incluant le
 # profil interactif `human_agent`. Chaque clé correspond exactement au nom du module Python définissant la classe
 # d'agent (`agents/<clé>.py`).
-HEURISTIC_AGENT_REGISTRY: Dict[str, Type[AbstractBaseAgent]] = {
+HEURISTIC_AGENT_REGISTRY: Dict[str, Callable[[int, GameConfig], AbstractBaseAgent]] = {
     "human_agent": HumanAgent,
     "random_bot": RandomBot,
     "greedy_bot": GreedyBot,
@@ -45,7 +45,7 @@ HEURISTIC_AGENT_REGISTRY: Dict[str, Type[AbstractBaseAgent]] = {
 
 # Sous-ensemble de HEURISTIC_AGENT_REGISTRY excluant le profil interactif `human_agent`, utilisé par les campagnes de
 # simulation automatisées (`research.run_simulation`) où aucun siège ne doit solliciter une saisie clavier.
-AUTOMATED_AGENT_REGISTRY: Dict[str, Type[AbstractBaseAgent]] = {
+AUTOMATED_AGENT_REGISTRY: Dict[str, Callable[[int, GameConfig], AbstractBaseAgent]] = {
     key: value for key, value in HEURISTIC_AGENT_REGISTRY.items() if key != "human_agent"
 }
 
