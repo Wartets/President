@@ -19,7 +19,8 @@ import argparse
 import os
 import shutil
 import time
-from typing import Any, Callable, Dict, List, Optional, cast
+import random
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import polars as pl
 import ray
@@ -98,12 +99,50 @@ _RULE_PRESETS: Dict[str, Dict[str, Any]] = {
 }
 
 
+def _shuffled_seat_assignment(
+    profiles: List[str],
+    weights_map: Dict[int, str],
+    default_weight_path: Optional[str],
+    trained_profiles_check_pid: int,
+    rng: random.Random,
+) -> Tuple[List[str], Dict[int, str]]:
+    """
+    Permute aléatoirement l'association entre profils de siège et identifiants de joueurs.
+
+    Paramètre `profiles` : liste ordonnée des profils à répartir, taille `player_count`.
+    Paramètre `weights_map` : association entre identifiant de siège d'origine et chemin de poids, à réaligner après permutation.
+    Paramètre `default_weight_path` : chemin de poids par défaut associé au siège d'origine `trained_profiles_check_pid` (typiquement 0),
+    à réaligner sur sa nouvelle position après permutation.
+    Paramètre `trained_profiles_check_pid` : identifiant de siège d'origine auquel `default_weight_path` était historiquement rattaché.
+    Paramètre `rng` : générateur pseudo-aléatoire dérivé de la graine de la partie, garantissant une permutation reproductible.
+    Retourne un tuple `(shuffled_profiles, shuffled_weights_map)` : `shuffled_profiles` est la liste des profils après permutation uniforme
+    des positions de sièges, `shuffled_weights_map` réassocie chaque chemin de poids à la nouvelle position occupée par le siège d'origine
+    correspondant. Effet de bord : consomme l'état interne de `rng`.
+    """
+    n = len(profiles)
+    order = list(range(n))
+    rng.shuffle(order)
+    # `order[new_pid] = old_pid` : le joueur new_pid reçoit le profil qui occupait old_pid avant permutation.
+    shuffled_profiles = [profiles[old_pid] for old_pid in order]
+    old_to_new = {old_pid: new_pid for new_pid, old_pid in enumerate(order)}
+    shuffled_weights_map: Dict[int, str] = {}
+    for old_pid, path in weights_map.items():
+        if old_pid in old_to_new:
+            shuffled_weights_map[old_to_new[old_pid]] = path
+    if default_weight_path and trained_profiles_check_pid in old_to_new:
+        new_default_pid = old_to_new[trained_profiles_check_pid]
+        shuffled_weights_map.setdefault(new_default_pid, default_weight_path)
+    return shuffled_profiles, shuffled_weights_map
+
+
 def _build_agents(
     agent_profile: str,
     config: GameConfig,
     weights_path: Optional[str],
     seat_profiles: Optional[List[str]] = None,
     seat_weights: Optional[Dict[int, str]] = None,
+    randomize_seats: bool = False,
+    seat_rng: Optional[random.Random] = None,
 ) -> Dict[int, AbstractBaseAgent]:
     """
     Construit l'association joueur/agent pour une partie donnée.
@@ -111,17 +150,27 @@ def _build_agents(
     Paramètre `agent_profile` : profil appliqué à tous les sièges lorsque `seat_profiles` n'est pas fourni, clé de `_AGENT_REGISTRY` ou de
     `_TRAINED_AGENT_PROFILES`.
     Paramètre `config` : configuration de la partie.
-    Paramètre `weights_path` : chemin d'un fichier de poids entraîné par défaut, appliqué au siège 0 lorsque celui-ci est d'un profil entraînable
-    et qu'aucune entrée `seat_weights` ne le concerne.
+    Paramètre `weights_path` : chemin d'un fichier de poids entraîné par défaut, appliqué au siège d'origine 0 lorsque celui-ci est d'un profil
+    entraînable et qu'aucune entrée `seat_weights` ne le concerne.
     Paramètre `seat_profiles` : association ordonnée de profils par siège, un profil distinct par identifiant de joueur ; si `None`, `agent_profile`
     est appliqué à l'ensemble des sièges.
     Paramètre `seat_weights` : association entre identifiant de siège et chemin de poids entraîné, prioritaire sur `weights_path` pour le siège
     concerné.
+    Paramètre `randomize_seats` : si vrai, permute aléatoirement l'affectation profil/siège avant construction, afin que l'impact de voisinage
+    de table ne soit jamais figé sur les mêmes profils au fil d'une campagne statistique ou d'un entraînement.
+    Paramètre `seat_rng` : générateur pseudo-aléatoire dédié à la permutation, requis si `randomize_seats` est vrai.
     Retourne un dictionnaire complet d'agents, de taille `config.player_count`, chaque agent construit via
-    `registry.agent_registry.build_agent`. Aucun effet de bord hors chargement disque des poids éventuels.
+    `registry.agent_registry.build_agent`. Aucun effet de bord hors chargement disque des poids éventuels et, si `randomize_seats` est vrai,
+    consommation de l'état interne de `seat_rng`.
     """
-    profiles = seat_profiles if seat_profiles is not None else [agent_profile] * config.player_count
-    weights_map = seat_weights or {}
+    profiles = list(seat_profiles) if seat_profiles is not None else [agent_profile] * config.player_count
+    weights_map = dict(seat_weights or {})
+
+    if randomize_seats:
+        if seat_rng is None:
+            raise ValueError("seat_rng est requis lorsque randomize_seats est vrai.")
+        profiles, weights_map = _shuffled_seat_assignment(profiles, weights_map, weights_path, 0, seat_rng)
+        weights_path = None  # déjà réintégré dans weights_map par _shuffled_seat_assignment le cas échéant
 
     agents: Dict[int, AbstractBaseAgent] = {}
     for pid in range(config.player_count):
@@ -178,7 +227,11 @@ class GameSimulationWorker:
         for offset in range(game_count):
             seed = base_seed + offset
             config = GameConfig(random_seed=seed, player_count=player_count, **overrides)
-            agents = _build_agents(self.agent_profile, config, weights_path, seat_profiles, seat_weights)
+            seat_rng = random.Random(f"{seed}:seat_shuffle")
+            agents = _build_agents(
+                self.agent_profile, config, weights_path, seat_profiles, seat_weights,
+                randomize_seats=True, seat_rng=seat_rng,
+            )
             logger = EventLogger()
             from engine.event_bus import EventBus
 

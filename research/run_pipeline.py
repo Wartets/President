@@ -50,6 +50,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import console_theme
 import naming
 from agents.greedy_bot import GreedyBot
+from agents.interface import AbstractBaseAgent
 from analytics.event_logger import EventLogger
 from analytics.metrics_calc import (
     action_space_entropy, branching_factor_average, gini_initial_hand_power,
@@ -794,7 +795,7 @@ def _run_tournament_incremental(
             .agg(pl.col("cumulative_vp").mean().alias("mean_cumulative_vp"))
         )
         scores = {row["profile"]: float(row["mean_cumulative_vp"]) for row in summary.to_dicts()}
-        champion = max(scores, key=scores.get) if scores else None
+        champion = max(scores, key=lambda profile: scores[profile]) if scores else None
         results[str(player_count)] = {
             "scores": scores,
             "champion": champion,
@@ -824,7 +825,7 @@ def _run_statistical_validation(
     une partie complète jetable, sans écriture sur disque.
     """
     config = GameConfig(random_seed=seed, player_count=player_count)
-    agents = {pid: GreedyBot(pid, config) for pid in range(player_count)}
+    agents: Dict[int, AbstractBaseAgent] = {pid: GreedyBot(pid, config) for pid in range(player_count)}
     logger = EventLogger()
     bus = EventBus()
     bus.subscribe(logger)
