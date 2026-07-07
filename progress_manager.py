@@ -63,6 +63,7 @@ class ProgressManager:
             TimeRemainingColumn(),
             console=self.console,
             transient=False,
+            expand=True,
         )
         self._summary_lines: List[str] = []
         self._throttles: Dict[TaskID, _TaskThrottle] = {}
@@ -70,12 +71,21 @@ class ProgressManager:
         self._lock = threading.Lock()
 
     def _render(self) -> Group:
-        body = "\n".join(self._summary_lines[-self.max_summary_lines:]) or "[grey62]En attente…[/grey62]"
-        panel = Panel(body, title="Journal", border_style="grey50", padding=(0, 1))
+        # La largeur disponible est requêtée à chaque rendu (plutôt que mise en cache) afin que le panneau s'adapte immédiatement à un
+        # redimensionnement du terminal, sans laisser de lignes tronquées ou de bordures désalignées d'un ancien rendu à une largeur différente.
+        available_width = max(20, self.console.size.width - 4)
+        wrapped_lines = []
+        for line in self._summary_lines[-self.max_summary_lines:]:
+            wrapped_lines.append(line if len(line) <= available_width else line[: available_width - 1] + "…")
+        body = "\n".join(wrapped_lines) or "[grey62]En attente…[/grey62]"
+        panel = Panel(body, title="Journal", border_style="grey50", padding=(0, 1), expand=True)
         return Group(panel, self._progress)
 
     def __enter__(self) -> "ProgressManager":
-        self._live = Live(self._render(), console=self.console, refresh_per_second=6, transient=False)
+        self._live = Live(
+            self._render(), console=self.console, refresh_per_second=6, transient=False,
+            vertical_overflow="crop", auto_refresh=True,
+        )
         self._live.__enter__()
         return self
 

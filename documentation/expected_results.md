@@ -120,3 +120,53 @@ Mann-Whitney ou intervalles de confiance disjoints).
 
 Attendu : une relation en cloche (un taux d'apprentissage trop faible converge lentement, un taux trop élevé déstabilise l'apprentissage),
 non monotone. Test : existence d'un taux d'apprentissage intermédiaire dont la performance finale médiane dépasse celle des extrêmes testés.
+
+## 19. Taux de victoire et taux de validité par profil d'agent réel (`win_rate_by_profile_ci.png`, `action_validity_by_profile_ci.png`, `suboptimal_pass_rate_ci.png`)
+
+Attendu : ces trois graphiques regroupent désormais les mesures par identité réelle d'agent (`profile`, reconstruite depuis les colonnes
+JSON `player_profiles` des résumés de simulation, cf. [`usage.md`, section 9](usage.md#9-simulations-de-masse-parallélisées-researchrun_simulation)) plutôt que par identifiant de siège brut, celui-ci changeant d'occupant d'une partie à l'autre du fait du mélange
+aléatoire des sièges. Ordre attendu, cohérent avec la hiérarchie de complexité algorithmique documentée dans `architecture.md`,
+section 5.3 : `random_bot` présente le taux de victoire le plus faible et `probabilistic_bot`/`scoring_bot`/`adaptive_bot`/`lookahead_bot`
+dominent `greedy_bot`/`rule_based_bot` de façon stable sur un échantillon suffisamment grand. Tout agent déterministe committing
+uniquement des actions légales doit présenter un taux de passe sous-optimal proche de zéro et un taux de validité des actions proche de un.
+
+## 20. Distribution normalisée des tailles de combinaison par profil (`combo_size_distribution_normalized.png`)
+
+Attendu : contrairement à un histogramme de comptages bruts (biaisé par le nombre inégal de poses observées par profil selon le volume de
+parties simulées pour chacun), la version normalisée additionne à 1 par profil et permet une comparaison directe de la propension
+relative de chaque profil à composer de grandes combinaisons. Test : `sum(proportion) ≈ 1.0` pour chaque profil.
+
+## 21. Distribution des rôles obtenus par profil (`role_distribution_by_profile_heatmap.png`)
+
+Attendu : les profils les plus performants (mesurés par le taux de victoire de la section 19) doivent présenter une proportion de
+`ROLE_PRESIDENT` supérieure à $1/5$ et une proportion de `ROLE_SCUM` inférieure à $1/5$, symétriquement aux profils les moins performants.
+Chaque ligne de la heatmap doit sommer à 1 (loi de probabilité totale par profil).
+
+## 22. Persistance de rôle (`role_persistence_summary.png`)
+
+Attendu : la probabilité de conserver `ROLE_PRESIDENT` ou `ROLE_SCUM` d'une manche à l'autre doit dépasser le seuil uniforme $1/5$,
+matérialisé par la ligne de référence du graphique, tant que `putsch_enabled` reste désactivé ou peu invoqué (mécanisme redistributif
+décrit en [`rules.md`, section 6.1](rules.md#61-modificateurs-de-pré-manche-pre_round_modifiers)).
+
+## 23. Vérification de convergence des points de victoire (`vp_convergence_check.png`)
+
+Attendu : sous le mode `SYMMETRICAL`, le VP moyen empirique par rang de sortie doit converger vers la droite théorique
+$VP(k) = (N-1)/2 - k$ à mesure que le volume de manches simulées augmente ; l'écart résiduel par rang doit décroître avec le nombre de
+manches accumulées au fil des lancements successifs du pipeline.
+
+## 24. Balayage systématique de paramètres (`sweep_<paramètre>_vs_<métrique>.png`) et heatmap d'impact (`parameter_impact_heatmap.png`)
+
+Attendu : un graphique distinct est produit automatiquement pour chaque couple (paramètre de `GameConfig` exploré par
+`research.run_pipeline`, métrique macro suivie) disposant d'au moins deux valeurs observées de chacun, sans qu'aucune combinaison ne
+doive être ajoutée manuellement à `research.generate_graphs` lors de l'extension future de la grille de règles. La heatmap d'impact
+synthétise en une seule vue le signe et l'amplitude de l'effet marginal (`True` moins `False`) de chaque paramètre booléen sur chaque
+métrique, permettant d'identifier rapidement les règles les plus influentes sur la complexité combinatoire (`branching_factor_average`,
+`action_space_entropy`) et sur la dynamique de la Révolution (`e_rev_volatility`) sans consulter individuellement chaque graphique de
+balayage.
+
+## 25. Tournoi linéaire contre neuronal (`tournament_results_ci.png`)
+
+Attendu : à volume d'entraînement croissant sur des lancements successifs du pipeline, l'écart de VP cumulé moyen entre `rl_agent` et
+`torch_rl_agent` doit se réduire ou s'inverser en faveur de `torch_rl_agent` (capacité de représentation supérieure du réseau à deux
+couches cachées face à la politique strictement linéaire), sans qu'aucune relation monotone ne soit garantie sur un unique lancement à
+faible volume d'entraînement.

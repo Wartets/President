@@ -1,12 +1,14 @@
 """
 Module du pipeline automatique complet de recherche.
 
-Le module orchestre, sans intervention humaine, une campagne de recherche incrémentale et adaptative : entraînement continu (jamais
-recommencé de zéro tant que des poids existent déjà) de l'agent linéaire et de l'agent neuronal distribué, balayage étendu d'hyperparamètres
-(taux d'apprentissage croisé avec le pool d'adversaires) avec sélection automatique de la meilleure combinaison observée par nombre de
-joueurs, réinjectée dans les sessions d'entraînement continu suivantes plutôt que de conserver un taux fixe arbitraire, simulations de
-référence dont l'ordre de traitement est reprioritisé à chaque lancement en faveur des combinaisons les moins couvertes, recherche
-combinatoire multi-configurations sur le produit cartésien profils/joueurs/présets, tournoi direct entre la politique linéaire et la
+Le module orchestre, sans intervention humaine, une campagne de recherche incrémentale et adaptative couvrant l'intégralité de l'espace des
+paramètres de `core.config.GameConfig` : entraînement continu (jamais recommencé de zéro tant que des poids existent déjà) de l'agent
+linéaire et de l'agent neuronal distribué, balayage étendu d'hyperparamètres (taux d'apprentissage croisé avec le pool d'adversaires) avec
+sélection automatique de la meilleure combinaison observée par nombre de joueurs, simulations de référence pour l'intégralité des profils
+heuristiques disponibles (à l'exception du profil de simulation par rollouts, jugé trop coûteux pour une campagne à grande échelle) croisés
+avec l'intégralité des nombres de joueurs et une grille étendue de configurations de règles (chaque paramètre booléen basculé
+individuellement, chaque valeur énumérée testée, plus un ensemble de combinaisons tirées aléatoirement pour capturer les interactions entre
+règles), recherche combinatoire multi-configurations sur ce même produit cartésien, tournoi direct entre la politique linéaire et la
 politique neuronale entraînées pour un même nombre de joueurs avec désignation d'un champion courant, vérification statistique automatisée
 d'un ensemble de propriétés générales attendues du moteur de règles sur une partie fraîche et jetable, évaluations comparatives du modèle
 linéaire contre les profils heuristiques, génération versionnée des graphiques, puis rédaction d'un rapport de synthèse relisant
@@ -17,7 +19,11 @@ d'entraînement, nouvelles combinaisons de balayage, nouvelles itérations combi
 calculé lors des lancements précédents, sans jamais recalculer ni écraser une donnée déjà acquise : le fichier
 `data/pipeline_manifest.json` conserve la couverture cumulée et sert de source de vérité entre deux lancements. Une interruption brutale
 (Ctrl+C, SIGTERM) est prise en compte entre deux unités de travail : le manifeste est sauvegardé avant de quitter, et le prochain lancement
-reprend exactement là où le précédent s'est arrêté plutôt que de recommencer les combinaisons déjà couvertes.
+reprend exactement là où le précédent s'est arrêté plutôt que de recommencer les combinaisons déjà couvertes. Étant donné l'ampleur de la
+grille de configurations couverte par défaut (produit cartésien de tous les profils heuristiques, tous les nombres de joueurs et une
+plusieurs dizaines de variantes de règles), un unique lancement ne couvre généralement qu'une fraction de la grille complète ; la
+priorisation par couverture cumulée croissante garantit que chaque combinaison finit par recevoir une couverture comparable au fil des
+lancements successifs, sans intervention manuelle.
 
 Seules les étapes ne gérant pas déjà leur propre affichage de progression (entraînement linéaire, balayage d'hyperparamètres, sélection des
 meilleurs hyperparamètres) s'exécutent sous le tableau de bord partagé `ProgressManager` ; les étapes qui embarquent leur propre système de
@@ -36,6 +42,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import os
+import random
 import sys
 import time
 import traceback
@@ -67,12 +74,16 @@ from progress_manager import ProgressManager
 _MANIFEST_PATH = os.path.join("data", "pipeline_manifest.json")
 _console = Console()
 
-# Fraction du nombre de parties normalement demandé appliquée aux profils notoirement coûteux (recherche par rollouts), pour éviter qu'ils
-# ne dominent la durée totale d'une campagne de référence sans pour autant les exclure de l'analyse.
-_EXPENSIVE_PROFILES = ("mcts_bot",)
-_EXPENSIVE_PROFILE_GAME_FRACTION = 0.25
+# Profils automatisés volontairement exclus de la recherche automatisée à grande échelle : le coût par décision de la simulation Monte-Carlo
+# par rollouts rend son inclusion dans une grille combinatoire de plusieurs dizaines de configurations disproportionnellement lente. Le profil
+# reste utilisable manuellement via `play_game.py`/`research.evaluate_agent`, il est seulement exclu de ce pipeline.
+_EXCLUDED_AUTOMATED_PROFILES = ("mcts_bot",)
 
 _PROGRESS_CHUNK_SIZE = 5
+
+# Nombre de combinaisons aléatoires supplémentaires générées par `_build_extended_rule_presets` afin de capturer les interactions entre règles
+# avancées qu'un balayage uniquement paramètre-par-paramètre ne peut pas révéler.
+_RANDOM_GRID_COMBOS = 24
 
 # Décroissance d'exploration utilisée par `training.train_rl.train`, répliquée ici pour estimer un epsilon de reprise cohérent avec le
 # nombre de manches déjà entraînées sur un modèle repris plutôt que recréé.
@@ -81,7 +92,7 @@ _EPSILON_MIN = 0.02
 _EPSILON_START = 0.3
 
 # Paramètres par défaut de la vérification statistique automatisée du moteur de règles.
-_VALIDATION_PLAYER_COUNT = 4
+_VALIDATION_PLAYER_COUNT = 5
 
 
 def _unique_path(path: str) -> str:
@@ -111,7 +122,7 @@ def _load_manifest() -> Dict[str, Any]:
     Retourne un dictionnaire de manifeste. Aucun effet de bord.
     """
     default = {
-        "schema_version": 3,
+        "schema_version": 4,
         "runs": [],
         "models": {},
         "baseline_coverage": {},
@@ -163,11 +174,107 @@ def _heuristic_profiles() -> List[str]:
     Détermine dynamiquement l'ensemble des profils heuristiques disponibles pour les campagnes de référence.
 
     Retourne la liste des clés de `research.run_simulation._AGENT_REGISTRY`, incluant automatiquement tout nouveau profil d'agent
-    heuristique enregistré dans `registry.agent_registry`, sans nécessiter de mise à jour manuelle de cette liste. Aucun effet de bord.
+    heuristique enregistré dans `registry.agent_registry`, à l'exception des profils listés dans `_EXCLUDED_AUTOMATED_PROFILES`. Aucun
+    effet de bord.
     """
     from research.run_simulation import _AGENT_REGISTRY as heuristic_registry
 
-    return list(heuristic_registry.keys())
+    return [name for name in heuristic_registry.keys() if name not in _EXCLUDED_AUTOMATED_PROFILES]
+
+
+def _build_extended_rule_presets() -> Dict[str, Dict[str, Any]]:
+    """
+    Construit une grille étendue de présets de règles couvrant l'intégralité de l'espace des paramètres de `GameConfig`.
+
+    Retourne un dictionnaire nommé de dictionnaires de surcharge de `GameConfig`, couvrant : chaque champ booléen basculé
+    individuellement dans les deux sens, chaque mode de distribution de VP, chaque sémantique de passe, plusieurs rangs magiques et de
+    saut de tour, les deux types de pénalité de sortie, chaque rôle ciblé par l'attribution stricte du reste, une configuration
+    "tout activé" et une configuration "tout désactivé", ainsi qu'un ensemble de combinaisons aléatoires reproductibles couvrant les
+    interactions entre paramètres. Les combinaisons structurellement invalides (ex : interception sans second paquet) ne sont pas
+    filtrées ici ; elles sont ignorées avec un avertissement par `research.run_combinatory.run_grid` au moment de leur utilisation.
+    Aucun effet de bord.
+    """
+    from core.config import (
+        PASS_TYPE_ALLOW_SOFT, PASS_TYPE_HARD_ONLY, PENALTY_DRAW_CARDS,
+        PENALTY_INSTANT_SCUM, ROLE_NEUTRAL, ROLE_PRESIDENT, ROLE_SCUM,
+        ROLE_VICE_PRESIDENT, ROLE_VICE_SCUM, VP_DISTRIBUTION_LEGACY_STEPPED,
+        VP_DISTRIBUTION_LINEAR, VP_DISTRIBUTION_SYMMETRICAL,
+    )
+
+    presets: Dict[str, Dict[str, Any]] = {}
+
+    boolean_fields = [
+        "skip_on_equal", "revolution_enabled", "double_revolution_enabled",
+        "straights_enabled", "skip_turn_enabled", "interception_enabled",
+        "putsch_enabled", "blind_tax_enabled", "strict_remainder_allocation",
+        "finish_penalty_enabled", "finish_penalty_extended", "no_finish_on_joker",
+        "no_finish_on_revolution", "use_jokers", "magic_two",
+    ]
+    for field in boolean_fields:
+        presets[f"toggle_{field}_on"] = {field: True}
+        presets[f"toggle_{field}_off"] = {field: False}
+
+    for vp_mode in (VP_DISTRIBUTION_LEGACY_STEPPED, VP_DISTRIBUTION_LINEAR, VP_DISTRIBUTION_SYMMETRICAL):
+        presets[f"vp_{vp_mode.lower()}"] = {"vp_distribution_type": vp_mode}
+
+    for pass_mode in (PASS_TYPE_HARD_ONLY, PASS_TYPE_ALLOW_SOFT):
+        presets[f"pass_{pass_mode.lower()}"] = {"pass_type": pass_mode}
+
+    for rank in ("5", "8", "10", "K"):
+        presets[f"magic_rank_{rank}"] = {"magic_card_enabled": True, "magic_card_rank": rank, "magic_two": False}
+
+    for rank in ("4", "7", "8", "J"):
+        presets[f"skip_turn_rank_{rank}"] = {"skip_turn_enabled": True, "skip_turn_rank": rank}
+
+    presets["finish_penalty_draw"] = {
+        "finish_penalty_enabled": True, "finish_penalty_type": PENALTY_DRAW_CARDS, "finish_penalty_draw_count": 2,
+    }
+    presets["finish_penalty_instant_full"] = {
+        "finish_penalty_enabled": True, "finish_penalty_type": PENALTY_INSTANT_SCUM,
+        "finish_penalty_extended": True, "no_finish_on_joker": True, "no_finish_on_revolution": True,
+    }
+
+    for role in (ROLE_PRESIDENT, ROLE_VICE_PRESIDENT, ROLE_NEUTRAL, ROLE_VICE_SCUM, ROLE_SCUM):
+        presets[f"strict_remainder_{role.lower()}"] = {"strict_remainder_allocation": True, "strict_remainder_role": role}
+
+    presets["everything_on"] = {field: True for field in boolean_fields}
+    presets["everything_off"] = {
+        field: False for field in boolean_fields if field not in ("use_jokers", "magic_two")
+    }
+
+    rng = random.Random("pipeline_random_grid_v1")
+    for combo_index in range(_RANDOM_GRID_COMBOS):
+        overrides: Dict[str, Any] = {}
+        for field in boolean_fields:
+            if rng.random() < 0.5:
+                overrides[field] = bool(rng.random() < 0.5)
+        overrides["vp_distribution_type"] = rng.choice(
+            [VP_DISTRIBUTION_LEGACY_STEPPED, VP_DISTRIBUTION_LINEAR, VP_DISTRIBUTION_SYMMETRICAL]
+        )
+        overrides["pass_type"] = rng.choice([PASS_TYPE_HARD_ONLY, PASS_TYPE_ALLOW_SOFT])
+        presets[f"random_combo_{combo_index}"] = overrides
+
+    return presets
+
+
+def _resolve_rule_presets(requested: str) -> List[str]:
+    """
+    Résout la liste effective de présets de règles à couvrir, en injectant systématiquement la grille étendue.
+
+    Paramètre `requested` : valeur brute de `--rule-presets`, soit `'auto'` pour couvrir la grille étendue complète en plus des présets
+    historiques (`base`, `straights`, `full`), soit une liste explicite de noms séparés par des virgules.
+    Retourne la liste résolue de noms de présets. Effet de bord : étend `research.run_simulation._RULE_PRESETS` en place avec
+    l'intégralité de la grille construite par `_build_extended_rule_presets`, quelle que soit la valeur de `requested`, afin que tout nom
+    de préset étendu référencé explicitement par l'appelant reste résolvable.
+    """
+    from research.run_simulation import _RULE_PRESETS as existing_presets
+
+    extended = _build_extended_rule_presets()
+    existing_presets.update(extended)
+
+    if requested.strip().lower() == "auto":
+        return ["base", "straights", "full"] + sorted(extended.keys())
+    return [token.strip() for token in requested.split(",") if token.strip()]
 
 
 def _prioritize_baseline_combos(
@@ -534,7 +641,7 @@ def _simulate_baselines_incremental(
     produit. Effet de bord : lance une campagne Ray par combinaison non interrompue, écrivant systématiquement un nouveau fichier
     Parquet distinct plutôt que d'écraser les segments déjà produits par des lancements antérieurs.
     """
-    from research.run_simulation import launch_research
+    from research.run_simulation import _RULE_PRESETS, launch_research
 
     results: Dict[str, Any] = {}
     for combo_index, (player_count, profile, preset) in enumerate(combos):
@@ -544,25 +651,19 @@ def _simulate_baselines_incremental(
         key = _baseline_key(player_count, profile, preset)
         coverage = manifest["baseline_coverage"].get(key, {"games_done": 0, "seed_cursor": seed_base, "parquet_paths": []})
 
-        effective_games = games_increment
-        if profile in _EXPENSIVE_PROFILES:
-            effective_games = max(5, int(games_increment * _EXPENSIVE_PROFILE_GAME_FRACTION))
-
-        from research.run_simulation import _RULE_PRESETS
-
         output_path = _unique_path(
             naming.build_research_filename(
-                f"pipeline_baseline_{preset}", player_count, profile, effective_games, rounds_per_game,
+                f"pipeline_baseline_{preset}", player_count, profile, games_increment, rounds_per_game,
             )
         )
         _console.print(
             console_theme.info_text(
                 f"Baseline {combo_index + 1}/{len(combos)} — p{player_count} / {profile} / {preset} : "
-                f"+{effective_games} parties (total après cette exécution : {coverage['games_done'] + effective_games})"
+                f"+{games_increment} parties (total après cette exécution : {coverage['games_done'] + games_increment})"
             )
         )
         launch_research(
-            total_games=effective_games,
+            total_games=games_increment,
             player_count=player_count,
             rounds_per_game=rounds_per_game,
             agent_profile=profile,
@@ -575,8 +676,8 @@ def _simulate_baselines_incremental(
             shutdown_ray=False,
         )
 
-        coverage["games_done"] += effective_games
-        coverage["seed_cursor"] += effective_games
+        coverage["games_done"] += games_increment
+        coverage["seed_cursor"] += games_increment
         coverage.setdefault("parquet_paths", []).append(output_path)
         manifest["baseline_coverage"][key] = coverage
         results[key] = coverage
@@ -943,6 +1044,7 @@ def _generate_final_report(manifest: Dict[str, Any], figures_version: Optional[i
     lines.append("")
 
     lines.append("## Couverture des simulations de référence")
+    lines.append(f"- Nombre total de combinaisons (joueurs, profil, préset) distinctes couvertes : {len(manifest['baseline_coverage'])}")
     for key, coverage in sorted(manifest["baseline_coverage"].items()):
         lines.append(f"- `{key}` : {coverage.get('games_done', 0)} parties cumulées sur {len(coverage.get('parquet_paths', []))} segment(s)")
     lines.append("")
@@ -1008,7 +1110,7 @@ def _print_manifest_summary(manifest: Dict[str, Any]) -> None:
     Retourne `None`. Effet de bord : écrit plusieurs tableaux `rich` sur la sortie standard. Appelée uniquement après la fermeture de tout
     tableau de bord `ProgressManager`/`Live` actif, garantissant un rendu correct.
     """
-    models_table = Table(title=f"[{console_theme.STYLE_STEP}]Modèles entraînés[/{console_theme.STYLE_STEP}]")
+    models_table = Table(title=f"[{console_theme.STYLE_STEP}]Modèles entraînés[/{console_theme.STYLE_STEP}]", expand=True)
     models_table.add_column("Modèle")
     models_table.add_column("Manches/étapes cumulées")
     models_table.add_column("VP moyen récent")
@@ -1016,19 +1118,26 @@ def _print_manifest_summary(manifest: Dict[str, Any]) -> None:
         models_table.add_row(key, str(info.get("rounds_trained_total", "?")), str(info.get("final_vp_mean", "n/a")))
     _console.print(models_table)
 
-    coverage_table = Table(title=f"[{console_theme.STYLE_STEP}]Couverture cumulée[/{console_theme.STYLE_STEP}]")
+    coverage_table = Table(title=f"[{console_theme.STYLE_STEP}]Couverture cumulée[/{console_theme.STYLE_STEP}]", expand=True)
     coverage_table.add_column("Combinaison")
     coverage_table.add_column("Type")
     coverage_table.add_column("Parties cumulées")
-    for key, coverage in sorted(manifest["baseline_coverage"].items()):
+    for key, coverage in sorted(manifest["baseline_coverage"].items())[:40]:
         coverage_table.add_row(key, "baseline", str(coverage.get("games_done", 0)))
     for key, coverage in sorted(manifest["evaluation_coverage"].items()):
         coverage_table.add_row(key, "évaluation", str(coverage.get("games_done", 0)))
     _console.print(coverage_table)
+    if len(manifest["baseline_coverage"]) > 40:
+        _console.print(
+            console_theme.info_text(
+                f"({len(manifest['baseline_coverage']) - 40} combinaison(s) de référence supplémentaire(s) omise(s) de "
+                "l'affichage, consulter le rapport de synthèse pour la liste complète.)"
+            )
+        )
 
     tournament_results = manifest.get("tournament_results", {})
     if tournament_results:
-        tournament_table = Table(title=f"[{console_theme.STYLE_STEP}]Tournoi linéaire vs neuronal[/{console_theme.STYLE_STEP}]")
+        tournament_table = Table(title=f"[{console_theme.STYLE_STEP}]Tournoi linéaire vs neuronal[/{console_theme.STYLE_STEP}]", expand=True)
         tournament_table.add_column("Joueurs")
         tournament_table.add_column("Champion")
         tournament_table.add_column("Scores")
@@ -1039,7 +1148,7 @@ def _print_manifest_summary(manifest: Dict[str, Any]) -> None:
 
     validation = manifest.get("validation_results", {})
     if validation:
-        validation_table = Table(title=f"[{console_theme.STYLE_STEP}]Vérification statistique[/{console_theme.STYLE_STEP}]")
+        validation_table = Table(title=f"[{console_theme.STYLE_STEP}]Vérification statistique[/{console_theme.STYLE_STEP}]", expand=True)
         validation_table.add_column("Vérification")
         validation_table.add_column("Statut")
         for check_name, check_info in validation.get("checks", {}).items():
@@ -1082,7 +1191,8 @@ def run_pipeline(
     Exécute une itération incrémentale complète du pipeline de recherche sur toute une grille de configurations.
 
     Paramètre `player_counts` : nombres de joueurs couverts par la grille d'analyse.
-    Paramètre `rule_presets` : présets de règles couverts par la grille d'analyse.
+    Paramètre `rule_presets` : présets de règles couverts par la grille d'analyse (voir `_resolve_rule_presets` pour la résolution du
+    mode `'auto'`).
     Paramètre `training_rounds_increment` : manches d'entraînement supplémentaires ajoutées à chaque modèle linéaire lors de cet appel.
     Paramètre `lr_sweep_rounds`, `lr_sweep_seeds`, `learning_rates`, `opponent_pools` : paramètres du balayage d'hyperparamètres.
     Paramètre `distributed_steps_increment` : étapes de gradient supplémentaires ajoutées à chaque modèle neuronal, si Redis est joignable.
@@ -1109,9 +1219,10 @@ def run_pipeline(
     run_index = len(manifest["runs"]) + 1
 
     baseline_profile_combos = [
-        (pc, profile, "base") for pc in player_counts for profile in profiles
-    ] + [
-        (pc, "rule_based_bot", preset) for pc in player_counts for preset in rule_presets if preset != "base"
+        (pc, profile, preset)
+        for pc in player_counts
+        for profile in profiles
+        for preset in rule_presets
     ]
     baseline_profile_combos = _prioritize_baseline_combos(manifest, baseline_profile_combos)
     evaluation_combos = list(itertools.product(player_counts, rule_presets))
@@ -1203,7 +1314,8 @@ def run_pipeline(
         "finished_at": time.time(),
         "interrupted": killer.should_stop,
         "player_counts": player_counts,
-        "rule_presets": rule_presets,
+        "rule_presets_count": len(rule_presets),
+        "profiles_count": len(profiles),
     })
     _save_manifest(manifest)
 
@@ -1227,31 +1339,38 @@ def main() -> None:
     Retourne `None`. Effet de bord : lit les arguments de la ligne de commande et invoque `run_pipeline`. Chaque lancement ajoute du
     travail neuf par-dessus la couverture déjà accumulée dans `data/pipeline_manifest.json` ; l'option `--reset-manifest` supprime cette
     couverture pour repartir d'une campagne vierge. L'option `--quick` réduit fortement tous les volumes de travail par itération, utile
-    pour valider rapidement que le pipeline s'exécute de bout en bout sans erreur.
+    pour valider rapidement que le pipeline s'exécute de bout en bout sans erreur. Par défaut, `--rule-presets` vaut `'auto'`, qui étend
+    la grille de règles couverte à l'intégralité des paramètres de `core.config.GameConfig` (chaque champ booléen basculé
+    individuellement, chaque valeur énumérée testée, plus des combinaisons aléatoires couvrant les interactions), et `--player-counts`
+    couvre par défaut l'ensemble des tailles de partie de 3 à 8 joueurs.
     """
     parser = argparse.ArgumentParser(
-        description="Pipeline automatique incrémental : entraînement continu, grille de configurations, graphiques versionnés."
+        description="Pipeline automatique incrémental : entraînement continu, grille de configurations étendue, graphiques versionnés."
     )
-    parser.add_argument("--player-counts", type=str, default="4,5,6")
-    parser.add_argument("--rule-presets", type=str, default="base,straights,full")
-    parser.add_argument("--training-rounds-increment", type=int, default=1000)
-    parser.add_argument("--lr-sweep-rounds", type=int, default=300)
+    parser.add_argument("--player-counts", type=str, default="3,4,5,6,7,8")
+    parser.add_argument(
+        "--rule-presets", type=str, default="auto",
+        help="'auto' pour couvrir l'intégralité de la grille de paramètres générée automatiquement, ou une liste explicite "
+             "de noms de présets séparés par des virgules.",
+    )
+    parser.add_argument("--training-rounds-increment", type=int, default=20000)
+    parser.add_argument("--lr-sweep-rounds", type=int, default=800)
     parser.add_argument("--lr-sweep-seeds", type=int, default=3)
-    parser.add_argument("--learning-rates", type=str, default="0.001,0.003,0.01,0.03,0.1")
+    parser.add_argument("--learning-rates", type=str, default="0.001,0.003,0.01,0.03,0.1,0.3")
     parser.add_argument("--opponent-pools", type=str, default="greedy,rule_based,mixed")
-    parser.add_argument("--distributed-steps-increment", type=int, default=200)
+    parser.add_argument("--distributed-steps-increment", type=int, default=2000)
     parser.add_argument("--skip-distributed", action="store_true")
-    parser.add_argument("--baseline-games-increment", type=int, default=60)
-    parser.add_argument("--baseline-rounds-per-game", type=int, default=10)
-    parser.add_argument("--evaluation-games-increment", type=int, default=60)
-    parser.add_argument("--evaluation-rounds-per-game", type=int, default=20)
-    parser.add_argument("--combinatorial-games-per-combo", type=int, default=15)
-    parser.add_argument("--combinatorial-rounds-per-game-values", type=str, default="10,30")
+    parser.add_argument("--baseline-games-increment", type=int, default=80)
+    parser.add_argument("--baseline-rounds-per-game", type=int, default=15)
+    parser.add_argument("--evaluation-games-increment", type=int, default=80)
+    parser.add_argument("--evaluation-rounds-per-game", type=int, default=25)
+    parser.add_argument("--combinatorial-games-per-combo", type=int, default=20)
+    parser.add_argument("--combinatorial-rounds-per-game-values", type=str, default="10,30,60")
     parser.add_argument("--skip-combinatorial", action="store_true")
-    parser.add_argument("--tournament-games", type=int, default=40)
-    parser.add_argument("--tournament-rounds-per-game", type=int, default=20)
+    parser.add_argument("--tournament-games", type=int, default=60)
+    parser.add_argument("--tournament-rounds-per-game", type=int, default=25)
     parser.add_argument("--skip-tournament", action="store_true")
-    parser.add_argument("--validation-rounds", type=int, default=40)
+    parser.add_argument("--validation-rounds", type=int, default=60)
     parser.add_argument("--skip-validation", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--redis-host", type=str, default="localhost")
@@ -1268,7 +1387,6 @@ def main() -> None:
         _console.print(console_theme.warning_text("Couverture cumulée réinitialisée."))
 
     player_counts = [int(token.strip()) for token in args.player_counts.split(",") if token.strip()]
-    rule_presets = [token.strip() for token in args.rule_presets.split(",") if token.strip()]
     learning_rates = [float(token.strip()) for token in args.learning_rates.split(",") if token.strip()]
     opponent_pools = [token.strip() for token in args.opponent_pools.split(",") if token.strip()]
     combinatorial_rounds_per_game_values = [
@@ -1284,6 +1402,7 @@ def main() -> None:
     combinatorial_games_per_combo = args.combinatorial_games_per_combo
     tournament_games = args.tournament_games
     validation_round_count = args.validation_rounds
+    rule_presets_arg = args.rule_presets
 
     if args.quick:
         training_rounds_increment = min(training_rounds_increment, 80)
@@ -1297,10 +1416,13 @@ def main() -> None:
         tournament_games = min(tournament_games, 6)
         validation_round_count = min(validation_round_count, 10)
         player_counts = player_counts[:1]
-        rule_presets = rule_presets[:2]
         opponent_pools = opponent_pools[:1] or ["mixed"]
         learning_rates = learning_rates[:2] or [0.01]
+        if rule_presets_arg.strip().lower() == "auto":
+            rule_presets_arg = "base,straights"
         _console.print(console_theme.warning_text("Mode --quick actif : volumes de travail fortement réduits."))
+
+    rule_presets = _resolve_rule_presets(rule_presets_arg)
 
     run_pipeline(
         player_counts=player_counts,

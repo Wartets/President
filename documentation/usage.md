@@ -468,7 +468,7 @@ python -m research.run_simulation --games 1000 --player-count 4 --rounds-per-gam
   --agent-profile rule_based_bot --workers 4 --output research_output.parquet --seed 0
 ```
 
-`--agent-profile` accepte `greedy_bot`, `rule_based_bot`, `random_bot`, `lookahead_bot`, `adaptive_bot`, `scoring_bot`, `mcts_bot`, `rl_agent`, `torch_rl_agent`, appliqué à l'ensemble des sièges de toutes les parties simulées (`_AGENT_REGISTRY`/`_TRAINED_AGENT_PROFILES` de `research/run_simulation.py`), les deux derniers nécessitant `--weights-path` pour charger des poids entraînés (le siège 0 reçoit l'agent entraîné, les sièges suivants reçoivent `rule_based_bot` par défaut). Voir [section 4.2](#42-sièges-disponibles---seats) pour le détail du comportement de chaque profil heuristique. Pour composer une partie hétérogène plutôt qu'un profil unique, utiliser `--seat-profiles` (liste de profils séparés par des virgules, taille `--player-count`) et, le cas échéant, `--seat-weights` (liste de couples `siège:chemin` séparés par des virgules, ciblant les sièges de profil entraînable) :
+`--agent-profile` accepte `greedy_bot`, `rule_based_bot`, `random_bot`, `lookahead_bot`, `adaptive_bot`, `scoring_bot`, `probabilistic_bot`, `mcts_bot`, `rl_agent`, `torch_rl_agent`, appliqué à l'ensemble des sièges de toutes les parties simulées (`_AGENT_REGISTRY`/`_TRAINED_AGENT_PROFILES` de `research/run_simulation.py`), les deux derniers nécessitant `--weights-path` pour charger des poids entraînés (le siège 0 reçoit l'agent entraîné, les sièges suivants reçoivent `rule_based_bot` par défaut). Voir [section 4.2](#42-sièges-disponibles---seats) pour le détail du comportement de chaque profil heuristique. Chaque partie simulée mélange aléatoirement l'affectation profil/siège (`_shuffled_seat_assignment`), et le résumé CSV produit conserve désormais cette affectation réelle par siège dans les colonnes JSON `player_profiles`/`player_ranks`/`player_suboptimal_rate`/`player_branching`/`player_cumulative_vp`, permettant à `research.generate_graphs` d'attribuer chaque métrique au profil d'agent réellement responsable plutôt qu'à un identifiant de siège qui change d'occupant d'une partie à l'autre. Pour composer une partie hétérogène plutôt qu'un profil unique, utiliser `--seat-profiles` (liste de profils séparés par des virgules, taille `--player-count`) et, le cas échéant, `--seat-weights` (liste de couples `siège:chemin` séparés par des virgules, ciblant les sièges de profil entraînable) :
 
 ```bash
 python -m research.run_simulation --games 500 --player-count 4 --rounds-per-game 10 \
@@ -929,20 +929,38 @@ l'implémentation.
 ## 18. Pipeline automatique complet de bout en bout (`research.run_pipeline`)
 
 ```bash
-python -m research.run_pipeline --player-count 4 --training-rounds 2000 \
-  --baseline-games-per-profile 100 --evaluation-games 200
+python -m research.run_pipeline --player-counts 3,4,5,6,7,8
 ```
 
-Exécute, sans aucune intervention humaine, l'intégralité du cycle de recherche : entraînement de l'agent à politique linéaire
-(`training.train_rl`), tentative d'entraînement distribué de l'agent à politique neuronale si un serveur Redis est joignable sur
-`--redis-host`/`--redis-port` (ignorée proprement sinon), simulations de référence pour chaque profil heuristique disponible, évaluation
-comparative de l'agent entraîné contre ces profils, génération de l'ensemble des graphiques (`research.generate_graphs`), puis rédaction
-d'un rapport de synthèse dans `data/final_report.md`.
+Exécute, sans aucune intervention humaine, l'intégralité du cycle de recherche sur une grille de configurations volontairement très large :
+entraînement de l'agent à politique linéaire (`training.train_rl`), tentative d'entraînement distribué de l'agent à politique neuronale si
+un serveur Redis est joignable sur `--redis-host`/`--redis-port` (ignorée proprement sinon), simulations de référence pour l'intégralité
+des profils heuristiques disponibles (à l'exception de `mcts_bot`, jugé trop coûteux pour une grille combinatoire de cette ampleur),
+évaluation comparative de l'agent entraîné contre ces profils, recherche combinatoire, tournoi direct politique linéaire/neuronale,
+vérification statistique automatisée du moteur de règles, génération de l'ensemble des graphiques (`research.generate_graphs`), puis
+rédaction d'un rapport de synthèse dans `data/final_report_latest.md`.
 
-La progression est journalisée dans `data/pipeline_state.json`. Si l'exécution est interrompue (arrêt manuel, panne), un nouveau lancement de
-la même commande reprend automatiquement à la première étape non marquée comme terminée, sans recommencer le travail déjà accompli. L'option
-`--reset` supprime ce fichier d'état et force une reprise complète depuis le début :
+Par défaut, `--rule-presets` vaut `'auto'` : le pipeline construit automatiquement (`_build_extended_rule_presets`) une grille couvrant
+l'intégralité des paramètres de `GameConfig` — chaque champ booléen basculé individuellement dans les deux sens (`toggle_<champ>_on`/
+`_off`), chaque mode de distribution de VP, chaque sémantique de passe, plusieurs rangs magiques et de saut de tour, les deux types de
+pénalité de sortie, chaque rôle ciblé par l'attribution stricte du reste, une configuration "tout activé" et une configuration "tout
+désactivé", ainsi que 24 combinaisons aléatoires reproductibles capturant les interactions entre règles — croisée avec l'intégralité des
+profils heuristiques disponibles et des nombres de joueurs demandés. Le produit cartésien résultant (généralement plusieurs centaines de
+combinaisons distinctes) n'est jamais couvert intégralement en un seul lancement : chaque combinaison de référence est priorisée par
+couverture cumulée croissante (`_prioritize_baseline_combos`), garantissant qu'un lancement ajoute toujours du travail neuf sur les
+combinaisons les moins couvertes, et que la grille complète converge vers une couverture homogène au fil de lancements successifs. Pour
+restreindre explicitement la grille à un sous-ensemble de présets nommés plutôt qu'à la grille étendue complète, passer une liste
+explicite : `--rule-presets base,straights,full`.
+
+La progression est journalisée dans `data/pipeline_manifest.json`. Si l'exécution est interrompue (arrêt manuel, panne), un nouveau
+lancement de la même commande reprend automatiquement à la couverture la moins avancée, sans recommencer le travail déjà accompli.
+L'option `--reset-manifest` supprime ce fichier d'état et force une reprise complète depuis le début :
 
 ```bash
-python -m research.run_pipeline --reset
+python -m research.run_pipeline --reset-manifest
 ```
+
+Le mode `--quick` réduit fortement tous les volumes de travail (manches d'entraînement, parties par combinaison, nombre de joueurs
+testés, grille de règles réduite à `base,straights`) pour valider en quelques minutes que le pipeline s'exécute de bout en bout sans
+erreur, avant de lancer une campagne complète avec les valeurs par défaut (bien plus coûteuses, pensées pour tourner en arrière-plan sur
+plusieurs heures ou lancements successifs).

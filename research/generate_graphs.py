@@ -1,12 +1,18 @@
 """
 Module de génération non interactive des graphiques d'analyse.
 
-Le module relit l'ensemble des fichiers Parquet segmentés, des résumés CSV, des manifestes de recherche combinatoire et des historiques
-d'entraînement produits dans `data/` et `weights/`, puis produit un ensemble de graphiques statiques et interactifs dans `figures/`, sans
-aucune fenêtre interactive ni aucun blocage sur une saisie utilisateur. Ce module est l'équivalent exécutable en une seule commande du
-carnet d'analyse existant, conçu pour être appelé depuis un pipeline automatique.
+Le module relit l'ensemble des fichiers Parquet segmentés, des résumés CSV, des manifestes de recherche combinatoire, des historiques
+d'entraînement et des résultats d'évaluation/tournoi produits dans `data/` et `weights/`, puis produit un large ensemble de graphiques
+statiques et interactifs dans `figures/`, sans aucune fenêtre interactive ni aucun blocage sur une saisie utilisateur. Au-delà des
+graphiques spécifiques historiques, le module construit systématiquement, pour chaque paramètre de configuration observé dans les
+données accumulées et pour chaque métrique macro suivie, un graphique de variation dédié (`_plot_parameter_sweep`), garantissant que
+toute nouvelle dimension explorée par `research.run_pipeline` se traduit automatiquement par de nouveaux graphiques sans modification de
+ce module. Chaque fonction de tracé est protégée par une garde d'absence de données ; l'indisponibilité d'une source ne bloque jamais la
+génération des autres graphiques de la même exécution, et aucune valeur n'est recalculée plus d'une fois par exécution (les métriques par
+profil et par joueur sont chargées directement depuis les colonnes précalculées des résumés de simulation plutôt que reconstruites par
+relecture du flux d'événements).
 
-Le module dépend de `matplotlib`, `seaborn`, `plotly`, `pandas`, `polars` n'est pas requis ici (lecture via `pandas`/`pyarrow`).
+Le module dépend de `matplotlib`, `seaborn`, `plotly`, `pandas`, `pyarrow` pour la lecture des données.
 """
 
 from __future__ import annotations
@@ -15,7 +21,7 @@ import glob
 import json
 import os
 import re
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 import matplotlib
 matplotlib.use("Agg")
@@ -36,6 +42,16 @@ _POINTS_TABLE = {
     "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10,
     "J": 11, "Q": 12, "K": 13, "A": 14, "2": 15, "JOKER": 16,
 }
+
+# Métriques macro communes présentes dans les résumés de simulation et les manifestes combinatoires, utilisées comme cible du balayage
+# systématique de paramètres (`_plot_parameter_sweep`) et des graphiques de corrélation/pairplot.
+_SWEEP_METRICS = [
+    ("branching_factor_average", "Facteur de branchement moyen"),
+    ("action_space_entropy", "Entropie de l'espace d'action (bits)"),
+    ("e_rev_volatility", "Bascules de révolution par manche"),
+    ("trick_length_average", "Longueur moyenne des plis"),
+    ("gini_initial_hand_power_mean", "Indice de Gini de la main initiale"),
+]
 
 # Motif extrayant le profil d'agent et le nombre de parties d'un nom de fichier de simulation nommé selon `naming.build_research_filename`,
 # pour construire un libellé court plutôt que d'afficher le nom de fichier complet (souvent long de plus de 60 caractères) dans une légende.
@@ -107,6 +123,14 @@ def _gini(values: List[float]) -> float:
     return (2 * cumulative) / (n * total) - (n + 1) / n
 
 
+def _savefig(fig, output_dir: str, name: str) -> None:
+    """Sauvegarde une figure matplotlib dans le répertoire versionné fourni et ferme la figure pour libérer la mémoire."""
+    os.makedirs(output_dir, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(os.path.join(output_dir, name), dpi=150)
+    plt.close(fig)
+
+
 def _load_segmented_parquet(pattern: str = "*.parquet") -> pd.DataFrame:
     """
     Charge et concatène l'ensemble des fichiers Parquet segmentés du répertoire `data/`.
@@ -136,24 +160,34 @@ def _expand_payload(df: pd.DataFrame, event_type: str) -> pd.DataFrame:
 
     Paramètre `df` : `DataFrame` au schéma segmenté (`event_type`, `payload`, ...).
     Paramètre `event_type` : type d'événement à isoler.
-    Retourne un `DataFrame` filtré et aplati, vide si aucun événement du type demandé n'est présent. Aucun effet de bord.
+    Retourne un `DataFrame` filtré et aplati, vide si aucun événement du type demandé n'est présent. Les champs de premier niveau
+    contenant eux-mêmes une association (par exemple `roles_by_player`, `vp_by_player`, `initial_hands`) sont conservés comme colonnes
+    à valeur de dictionnaire plutôt qu'aplatis en colonnes supplémentaires, `max_level=0` limitant l'expansion au premier niveau du
+    payload. Aucun effet de bord.
     """
     subset = df[df["event_type"] == event_type].copy()
     if subset.empty:
         return subset
     payloads = subset["payload"].apply(json.loads)
-    payload_df = pd.json_normalize(payloads.tolist())
+    payload_df = pd.json_normalize(payloads.tolist(), max_level=0)
     payload_df.index = subset.index
     return pd.concat([subset.drop(columns=["payload"]), payload_df], axis=1)
 
 
 def _load_summary_csvs(pattern: str = "*summary.csv") -> pd.DataFrame:
-    """Charge et concatène les fichiers de résumé de campagne (`research.run_simulation`)."""
+    """Charge et concatène les fichiers de résumé de campagne (`research.run_simulation`), y compris les colonnes JSON par joueur."""
     paths = sorted(glob.glob(os.path.join(DATA_DIR, pattern)))
-    frames = [pd.read_csv(path) for path in paths]
+    frames = []
+    for path in paths:
+        try:
+            frame = pd.read_csv(path)
+        except Exception:
+            continue
+        frame["source_file"] = os.path.basename(path)
+        frames.append(frame)
     if not frames:
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+    return pd.concat(frames, ignore_index=True, sort=False)
 
 
 def _load_grid_manifests(pattern: str = "*manifest*.csv") -> pd.DataFrame:
@@ -162,7 +196,7 @@ def _load_grid_manifests(pattern: str = "*manifest*.csv") -> pd.DataFrame:
     frames = [pd.read_csv(path) for path in paths]
     if not frames:
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+    return pd.concat(frames, ignore_index=True, sort=False)
 
 
 def _load_training_histories(pattern: str = "*history.csv") -> pd.DataFrame:
@@ -194,43 +228,147 @@ def _load_learning_rate_sweep(pattern: str = "learning_rate_sweep*.csv") -> pd.D
     return pd.concat(frames, ignore_index=True).drop_duplicates()
 
 
-def _plot_learning_rate_sweep(sweep_df: pd.DataFrame, output_dir: str) -> None:
-    """Performance finale d'entraînement par taux d'apprentissage testé (boîtes à moustaches)."""
-    if sweep_df.empty or "learning_rate" not in sweep_df.columns or "final_vp_mean" not in sweep_df.columns:
-        return
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ordered = sweep_df.sort_values("learning_rate")
-    hue_column = "player_count" if "player_count" in ordered.columns else None
-    sns.boxplot(data=ordered, x="learning_rate", y="final_vp_mean", hue=hue_column, ax=ax)
-    ax.set_xlabel("Taux d'apprentissage")
-    ax.set_ylabel("VP moyen final (fin d'entraînement)")
-    ax.set_title("Performance finale selon le taux d'apprentissage")
-    if hue_column:
-        ax.legend(title="Joueurs", fontsize=8)
-    _savefig(fig, output_dir, "learning_rate_final_performance_boxplot.png")
-
-
 def _load_evaluation_csvs(pattern: str = "*.csv") -> pd.DataFrame:
-    """Charge et concatène les fichiers d'évaluation comparative (`research.evaluate_agent`), en excluant résumés et manifestes."""
+    """
+    Charge et concatène les fichiers d'évaluation comparative (`research.evaluate_agent`).
+
+    Paramètre `pattern` : motif de nom de fichier.
+    Retourne un `DataFrame` pandas, vide si aucun fichier ne correspond. Les fichiers de résumé, de manifeste, de balayage de taux
+    d'apprentissage et de tournoi sont explicitement exclus par leur nom, et tout fichier chargé sans les colonnes `profile` et
+    `cumulative_vp` attendues d'un export d'évaluation est ignoré, évitant qu'un CSV structurellement différent (par exemple le
+    balayage de taux d'apprentissage, qui ne porte aucune colonne `profile`) ne pollue l'analyse d'un profil `NaN` fantôme. Aucun
+    effet de bord.
+    """
+    excluded_markers = ("summary", "manifest", "learning_rate_sweep", "tournament")
     paths = sorted(glob.glob(os.path.join(DATA_DIR, pattern)))
-    paths = [p for p in paths if "summary" not in os.path.basename(p) and "manifest" not in os.path.basename(p)]
+    paths = [p for p in paths if not any(marker in os.path.basename(p) for marker in excluded_markers)]
     frames = []
     for path in paths:
-        frame = pd.read_csv(path)
+        try:
+            frame = pd.read_csv(path)
+        except Exception:
+            continue
+        if "profile" not in frame.columns or "cumulative_vp" not in frame.columns:
+            continue
         frame["source_file"] = os.path.basename(path)
         frames.append(frame)
     if not frames:
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+    combined = pd.concat(frames, ignore_index=True, sort=False)
+    return combined.dropna(subset=["profile"])
 
 
-def _savefig(fig, output_dir: str, name: str) -> None:
-    """Sauvegarde une figure matplotlib dans le répertoire versionné fourni et ferme la figure pour libérer la mémoire."""
-    os.makedirs(output_dir, exist_ok=True)
-    fig.tight_layout()
-    fig.savefig(os.path.join(output_dir, name), dpi=150)
-    plt.close(fig)
+def _load_tournament_csvs(pattern: str = "*tournament*.csv") -> pd.DataFrame:
+    """
+    Charge et concatène les fichiers de résultats de tournoi linéaire contre neuronal (`research.run_pipeline`).
 
+    Paramètre `pattern` : motif de nom de fichier.
+    Retourne un `DataFrame` pandas, vide si aucun fichier ne correspond, ou si les colonnes attendues sont absentes. Aucun effet de bord.
+    """
+    paths = sorted(glob.glob(os.path.join(DATA_DIR, pattern)))
+    frames = []
+    for path in paths:
+        try:
+            frame = pd.read_csv(path)
+        except Exception:
+            continue
+        if "profile" not in frame.columns:
+            continue
+        frame["source_file"] = os.path.basename(path)
+        frames.append(frame)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True, sort=False).dropna(subset=["profile"])
+
+
+def _parse_json_column(value) -> Dict:
+    """
+    Analyse une valeur de colonne susceptible de porter une association JSON sérialisée.
+
+    Paramètre `value` : valeur brute lue depuis un CSV, chaîne JSON attendue ou valeur manquante.
+    Retourne un dictionnaire, vide si `value` est manquante ou n'est pas un JSON valide. Aucun effet de bord.
+    """
+    if not isinstance(value, str) or not value:
+        return {}
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+
+
+def _build_profile_long_df(summary_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Reconstruit un tableau long (une ligne par joueur et par partie) associant chaque siège à son profil d'agent réel.
+
+    Paramètre `summary_df` : résumé de campagne de simulation (`research.run_simulation`), portant les colonnes JSON par joueur
+    (`player_profiles`, `player_ranks`, `player_suboptimal_rate`, `player_branching`, `player_cumulative_vp`) précalculées au moment de
+    la simulation, sans nécessiter de relecture du flux d'événements brut.
+    Retourne un `DataFrame` avec une ligne par couple (partie, joueur), vide si `summary_df` ne porte pas la colonne `player_profiles`
+    (résumés produits par une version antérieure du moteur de simulation). Aucun effet de bord.
+    """
+    if summary_df.empty or "player_profiles" not in summary_df.columns:
+        return pd.DataFrame()
+    rows: List[Dict] = []
+    for _, row in summary_df.iterrows():
+        profiles = _parse_json_column(row.get("player_profiles"))
+        if not profiles:
+            continue
+        ranks = _parse_json_column(row.get("player_ranks"))
+        suboptimal = _parse_json_column(row.get("player_suboptimal_rate"))
+        branching = _parse_json_column(row.get("player_branching"))
+        cumulative_vp = _parse_json_column(row.get("player_cumulative_vp"))
+        for pid_str, profile in profiles.items():
+            rows.append({
+                "game_id": row.get("game_id"),
+                "seed": row.get("seed"),
+                "player_count": row.get("player_count"),
+                "player_id": int(pid_str),
+                "profile": profile,
+                "rank": ranks.get(pid_str),
+                "suboptimal_rate": suboptimal.get(pid_str),
+                "branching_factor": branching.get(pid_str),
+                "cumulative_vp": cumulative_vp.get(pid_str),
+            })
+    return pd.DataFrame(rows)
+
+
+def _build_profile_summary(profile_long_df: pd.DataFrame, evaluation_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Agrège un résumé comparatif unique par profil d'agent, combinant les données de référence et d'évaluation.
+
+    Paramètre `profile_long_df` : tableau long par joueur/partie, résultat de `_build_profile_long_df`.
+    Paramètre `evaluation_df` : évaluations comparatives chargées par `_load_evaluation_csvs`.
+    Retourne un `DataFrame` avec une ligne par profil, portant le taux de victoire, la puissance de branchement moyenne, le taux de
+    validité des actions, le VP moyen d'évaluation et le taux de manches au rôle `ROLE_PRESIDENT`, lorsque ces informations sont
+    disponibles. Aucun effet de bord.
+    """
+    rows: List[Dict] = []
+    if not profile_long_df.empty:
+        for profile, group in profile_long_df.groupby("profile"):
+            rows.append({
+                "profile": profile,
+                "win_rate": float((group["rank"] == 0).mean()) if "rank" in group else np.nan,
+                "mean_branching": float(group["branching_factor"].mean()) if "branching_factor" in group else np.nan,
+                "action_validity_rate": (
+                    float(1.0 - group["suboptimal_rate"].mean()) if "suboptimal_rate" in group else np.nan
+                ),
+                "mean_vp_baseline": float(group["cumulative_vp"].mean()) if "cumulative_vp" in group else np.nan,
+            })
+    summary = pd.DataFrame(rows)
+
+    if not evaluation_df.empty and "president_rounds" in evaluation_df.columns and "rounds_per_game" in evaluation_df.columns:
+        eval_df = evaluation_df.copy()
+        eval_df["president_rate"] = eval_df["president_rounds"] / eval_df["rounds_per_game"].clip(lower=1)
+        eval_grouped = eval_df.groupby("profile").agg(
+            mean_vp=("cumulative_vp", "mean"),
+            president_rate=("president_rate", "mean"),
+        ).reset_index()
+        summary = summary.merge(eval_grouped, on="profile", how="outer") if not summary.empty else eval_grouped
+
+    return summary
+
+
+# Graphiques historiques, corrigés
 
 def _plot_vp_by_rank_violin(finished_df: pd.DataFrame, output_dir: str) -> None:
     """Distribution des points de victoire par rang de sortie (violin plot)."""
@@ -244,30 +382,75 @@ def _plot_vp_by_rank_violin(finished_df: pd.DataFrame, output_dir: str) -> None:
     _savefig(fig, output_dir, "vp_by_rank_violin.png")
 
 
-def _plot_win_rate_by_player(finished_df: pd.DataFrame, output_dir: str) -> None:
-    """Taux de victoire par identifiant de joueur, avec intervalle de confiance."""
-    if finished_df.empty:
+def _plot_win_rate_by_profile(profile_long_df: pd.DataFrame, output_dir: str) -> None:
+    """Taux de victoire par profil d'agent réel (identité, indépendante du siège occupé), avec intervalle de confiance."""
+    if profile_long_df.empty or "rank" not in profile_long_df.columns:
         return
-    finished_df = finished_df.copy()
-    finished_df["is_winner"] = finished_df["rank"] == 0
-    fig, ax = plt.subplots(figsize=(8, 5))
-    sns.barplot(data=finished_df, x="player_id", y="is_winner", errorbar=("ci", 95), ax=ax)
-    ax.set_xlabel("Identifiant de joueur")
+    data = profile_long_df.dropna(subset=["rank", "profile"]).copy()
+    if data.empty:
+        return
+    data["is_winner"] = data["rank"] == 0
+    order = data.groupby("profile")["is_winner"].mean().sort_values(ascending=False).index
+    fig, ax = plt.subplots(figsize=(9, 5))
+    sns.barplot(data=data, x="profile", y="is_winner", order=order, errorbar=("ci", 95), ax=ax)
+    ax.set_xlabel("Profil d'agent")
     ax.set_ylabel("Taux de victoire (rang 0)")
-    ax.set_title("Taux de victoire par joueur")
-    _savefig(fig, output_dir, "win_rate_by_player_ci.png")
+    ax.set_title("Taux de victoire par profil d'agent (sièges mélangés à chaque partie)")
+    ax.tick_params(axis="x", rotation=30, labelsize=8)
+    _savefig(fig, output_dir, "win_rate_by_profile_ci.png")
 
 
-def _plot_suboptimal_pass_rate(action_played_df: pd.DataFrame, output_dir: str) -> None:
-    """Taux de passe sous-optimal par identifiant de joueur, avec intervalle de confiance."""
-    if action_played_df.empty:
+def _plot_suboptimal_pass_rate(action_played_df: pd.DataFrame, profile_long_df: pd.DataFrame, output_dir: str) -> None:
+    """Taux de passe sous-optimal par profil d'agent réel, avec intervalle de confiance."""
+    if action_played_df.empty or "was_suboptimal" not in action_played_df.columns:
         return
-    fig, ax = plt.subplots(figsize=(8, 5))
-    sns.barplot(data=action_played_df, x="player_id", y="was_suboptimal", errorbar=("ci", 95), ax=ax)
-    ax.set_xlabel("Identifiant de joueur")
+    merged = action_played_df.copy()
+    merged["was_suboptimal"] = merged["was_suboptimal"].astype(bool)
+    group_col = "player_id"
+    if not profile_long_df.empty and "game_id" in merged.columns and "player_id" in merged.columns:
+        lookup = profile_long_df[["game_id", "player_id", "profile"]].drop_duplicates()
+        merged = merged.merge(lookup, on=["game_id", "player_id"], how="left")
+        if merged["profile"].notna().any():
+            merged["profile"] = merged["profile"].fillna("inconnu")
+            group_col = "profile"
+    if merged.empty:
+        return
+    fig, ax = plt.subplots(figsize=(9, 5))
+    sns.barplot(data=merged, x=group_col, y="was_suboptimal", errorbar=("ci", 95), ax=ax)
+    ax.set_xlabel("Profil d'agent" if group_col == "profile" else "Identifiant de joueur")
     ax.set_ylabel("Taux de passe sous-optimal")
-    ax.set_title("Taux de passe sous-optimal par joueur")
+    ax.set_title("Taux de passe sous-optimal" + (" par profil d'agent" if group_col == "profile" else " par identifiant de joueur"))
+    ax.tick_params(axis="x", rotation=30, labelsize=8)
     _savefig(fig, output_dir, "suboptimal_pass_rate_ci.png")
+
+
+def _plot_action_validity_by_profile(profile_long_df: pd.DataFrame, output_dir: str) -> None:
+    """Taux de validité des actions (complément du taux de passe sous-optimal) par profil, précalculé dans les résumés."""
+    if profile_long_df.empty or "suboptimal_rate" not in profile_long_df.columns:
+        return
+    data = profile_long_df.dropna(subset=["suboptimal_rate", "profile"]).copy()
+    if data.empty:
+        return
+    data["validity_rate"] = 1.0 - data["suboptimal_rate"]
+    fig, ax = plt.subplots(figsize=(9, 5))
+    sns.barplot(data=data, x="profile", y="validity_rate", errorbar=("ci", 95), ax=ax)
+    ax.set_xlabel("Profil d'agent")
+    ax.set_ylabel("Taux de validité des actions")
+    ax.set_title("Taux de validité des actions par profil (mesure agrégée par partie)")
+    ax.tick_params(axis="x", rotation=30, labelsize=8)
+    _savefig(fig, output_dir, "action_validity_by_profile_ci.png")
+
+
+def _plot_role_transition_heatmap(matrix: pd.DataFrame, output_dir: str) -> None:
+    """Heatmap de la matrice de transition des rôles."""
+    if matrix.empty:
+        return
+    fig, ax = plt.subplots(figsize=(7, 6))
+    sns.heatmap(matrix, annot=True, fmt=".2f", cmap="viridis", vmin=0, vmax=1, ax=ax)
+    ax.set_xlabel("Rôle manche suivante")
+    ax.set_ylabel("Rôle manche courante")
+    ax.set_title("Transition des rôles d'une manche à la suivante")
+    _savefig(fig, output_dir, "role_transition_heatmap.png")
 
 
 def _role_transition_matrix(round_end_df: pd.DataFrame) -> pd.DataFrame:
@@ -280,6 +463,8 @@ def _role_transition_matrix(round_end_df: pd.DataFrame) -> pd.DataFrame:
     for _, group in grouped:
         roles_sequence = group["roles_by_player"].tolist()
         for earlier, later in zip(roles_sequence, roles_sequence[1:]):
+            if not isinstance(earlier, dict) or not isinstance(later, dict):
+                continue
             for pid, role_a in earlier.items():
                 role_b = later.get(pid)
                 if role_b is None:
@@ -297,32 +482,59 @@ def _role_transition_matrix(round_end_df: pd.DataFrame) -> pd.DataFrame:
     return matrix
 
 
-def _plot_role_transition_heatmap(matrix: pd.DataFrame, output_dir: str) -> None:
-    """Heatmap de la matrice de transition des rôles."""
+def _plot_role_distribution_by_profile(round_end_df: pd.DataFrame, profile_long_df: pd.DataFrame, output_dir: str) -> None:
+    """Heatmap de la distribution des rôles obtenus par chaque profil d'agent réel."""
+    if round_end_df.empty or profile_long_df.empty or "roles_by_player" not in round_end_df.columns:
+        return
+    lookup = profile_long_df.drop_duplicates(subset=["game_id", "player_id"]).set_index(["game_id", "player_id"])["profile"]
+    records = []
+    for _, row in round_end_df.iterrows():
+        roles = row["roles_by_player"]
+        if not isinstance(roles, dict):
+            continue
+        for pid_str, role in roles.items():
+            key = (row.get("game_id"), int(pid_str))
+            profile = lookup.get(key)
+            if profile is None:
+                continue
+            records.append({"profile": profile, "role": role})
+    if not records:
+        return
+    role_df = pd.DataFrame(records)
+    matrix = pd.crosstab(role_df["profile"], role_df["role"], normalize="index")
+    roles_order = ["ROLE_PRESIDENT", "ROLE_VICE_PRESIDENT", "ROLE_NEUTRAL", "ROLE_VICE_SCUM", "ROLE_SCUM"]
+    matrix = matrix.reindex(columns=[r for r in roles_order if r in matrix.columns])
     if matrix.empty:
         return
-    fig, ax = plt.subplots(figsize=(7, 6))
-    sns.heatmap(matrix, annot=True, fmt=".2f", cmap="viridis", vmin=0, vmax=1, ax=ax)
-    ax.set_xlabel("Rôle manche suivante")
-    ax.set_ylabel("Rôle manche courante")
-    ax.set_title("Transition des rôles d'une manche à la suivante")
-    _savefig(fig, output_dir, "role_transition_heatmap.png")
+    fig, ax = plt.subplots(figsize=(8, max(4, 0.45 * len(matrix))))
+    sns.heatmap(matrix, annot=True, fmt=".2f", cmap="magma", vmin=0, vmax=1, ax=ax)
+    ax.set_xlabel("Rôle attribué")
+    ax.set_ylabel("Profil d'agent")
+    ax.set_title("Distribution des rôles obtenus par profil d'agent")
+    _savefig(fig, output_dir, "role_distribution_by_profile_heatmap.png")
 
 
 def _plot_gini_histogram(round_start_df: pd.DataFrame, output_dir: str) -> None:
-    """Histogramme de l'indice de Gini de la puissance de main initiale."""
+    """Histogramme de l'indice de Gini de la puissance de main initiale, facetté par nombre de joueurs."""
     if round_start_df.empty or "initial_hands" not in round_start_df.columns:
         return
     records = []
     for _, row in round_start_df.iterrows():
-        for pid, cards in row["initial_hands"].items():
+        hands = row["initial_hands"]
+        if not isinstance(hands, dict):
+            continue
+        player_count = len(hands)
+        for pid, cards in hands.items():
             power_sum = sum(_POINTS_TABLE.get(card["rank"], 0) for card in cards if card["rank"] != "JOKER")
-            records.append({"game_id": row["game_id"], "round_id": row["round_id"], "player_id": pid, "hand_power": power_sum})
+            records.append({
+                "game_id": row["game_id"], "round_id": row["round_id"], "player_id": pid,
+                "hand_power": power_sum, "player_count": player_count,
+            })
     hand_power_df = pd.DataFrame(records)
     if hand_power_df.empty:
         return
     gini_per_round = (
-        hand_power_df.groupby(["game_id", "round_id"])["hand_power"]
+        hand_power_df.groupby(["game_id", "round_id", "player_count"])["hand_power"]
         .apply(lambda values: _gini(values.tolist()))
         .reset_index(name="gini")
     )
@@ -332,6 +544,15 @@ def _plot_gini_histogram(round_start_df: pd.DataFrame, output_dir: str) -> None:
     ax.set_ylabel("Nombre de manches")
     ax.set_title("Répartition de l'indice de Gini des mains initiales")
     _savefig(fig, output_dir, "gini_hand_power_histogram.png")
+
+    if gini_per_round["player_count"].nunique() > 1:
+        grid = sns.FacetGrid(gini_per_round, col="player_count", col_wrap=3, height=3.2, sharex=True, sharey=False)
+        grid.map_dataframe(sns.histplot, x="gini", kde=True)
+        grid.set_axis_labels("Indice de Gini", "Manches")
+        grid.fig.suptitle("Indice de Gini des mains initiales par nombre de joueurs", y=1.02)
+        os.makedirs(output_dir, exist_ok=True)
+        grid.savefig(os.path.join(output_dir, "gini_hand_power_by_player_count.png"), dpi=150)
+        plt.close(grid.fig)
 
 
 def _plot_branching_factor_vs_players(manifest_df: pd.DataFrame, output_dir: str) -> None:
@@ -343,7 +564,7 @@ def _plot_branching_factor_vs_players(manifest_df: pd.DataFrame, output_dir: str
         .agg(["mean", "std", "count"]).reset_index()
     )
     grouped["sem"] = grouped["std"].fillna(0) / grouped["count"].clip(lower=1) ** 0.5
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(9, 5))
     for profile, group in grouped.groupby("agent_profile"):
         group = group.sort_values("player_count")
         ax.plot(group["player_count"], group["mean"], marker="o", label=_truncate_label(str(profile), 18))
@@ -351,26 +572,53 @@ def _plot_branching_factor_vs_players(manifest_df: pd.DataFrame, output_dir: str
     ax.set_xlabel("Nombre de joueurs")
     ax.set_ylabel("Facteur de branchement moyen")
     ax.set_title("Facteur de branchement par profil")
-    ax.legend(title="Profil", fontsize=8)
+    ax.legend(title="Profil", fontsize=7, ncol=2)
     _savefig(fig, output_dir, "branching_factor_vs_player_count.png")
 
+    if "rule_preset" in manifest_df.columns and manifest_df["rule_preset"].nunique() > 1:
+        top_presets = manifest_df["rule_preset"].value_counts().head(8).index
+        subset = manifest_df[manifest_df["rule_preset"].isin(top_presets)]
+        fig, ax = plt.subplots(figsize=(10, 6))
+        sns.boxplot(data=subset, x="rule_preset", y="branching_factor_average", hue="player_count", ax=ax)
+        ax.set_xlabel("Préset de règles")
+        ax.set_ylabel("Facteur de branchement moyen")
+        ax.set_title("Facteur de branchement par préset de règles et nombre de joueurs (8 présets les plus couverts)")
+        ax.tick_params(axis="x", rotation=30, labelsize=8)
+        ax.legend(title="Joueurs", fontsize=7)
+        _savefig(fig, output_dir, "branching_factor_by_preset_boxplot.png")
 
-def _plot_combo_size_distribution(action_played_df: pd.DataFrame, output_dir: str) -> None:
-    """Distribution des tailles de combinaison jouées, par source."""
+
+def _plot_combo_size_distribution(action_played_df: pd.DataFrame, profile_long_df: pd.DataFrame, output_dir: str) -> None:
+    """Distribution normalisée (proportion, non comptage brut) des tailles de combinaison jouées, par profil d'agent."""
     if action_played_df.empty:
         return
     played = action_played_df[action_played_df["action_type"] == "ACTION_PLAY"].copy()
     if played.empty:
         return
     played["combo_size"] = played["cards_played"].apply(len)
-    hue_column = "source_label" if "source_label" in played.columns else "source_file"
+
+    group_col = "player_id"
+    if not profile_long_df.empty and "game_id" in played.columns and "player_id" in played.columns:
+        lookup = profile_long_df[["game_id", "player_id", "profile"]].drop_duplicates()
+        merged = played.merge(lookup, on=["game_id", "player_id"], how="left")
+        if merged["profile"].notna().any():
+            merged["profile"] = merged["profile"].fillna("inconnu")
+            group_col = "profile"
+    else:
+        merged = played
+        merged[group_col] = merged.get("source_label", merged.get("source_file", "inconnu"))
+
+    counts = merged.groupby([group_col, "combo_size"]).size().reset_index(name="count")
+    totals = counts.groupby(group_col)["count"].transform("sum")
+    counts["proportion"] = counts["count"] / totals
+
     fig, ax = plt.subplots(figsize=(9, 5))
-    sns.countplot(data=played, x="combo_size", hue=hue_column, ax=ax)
+    sns.barplot(data=counts, x="combo_size", y="proportion", hue=group_col, ax=ax)
     ax.set_xlabel("Taille de combinaison")
-    ax.set_ylabel("Nombre de poses")
-    ax.set_title("Distribution des tailles de combinaison jouées")
-    ax.legend(title="Source", fontsize=7)
-    _savefig(fig, output_dir, "combo_size_distribution.png")
+    ax.set_ylabel("Proportion des poses de ce profil")
+    ax.set_title("Distribution normalisée des tailles de combinaison par profil")
+    ax.legend(title="Profil" if group_col == "profile" else "Source", fontsize=7, ncol=2)
+    _savefig(fig, output_dir, "combo_size_distribution_normalized.png")
 
 
 def _plot_actions_per_round_violin(action_played_df: pd.DataFrame, output_dir: str) -> None:
@@ -439,7 +687,7 @@ def _plot_training_learning_curves(history_df: pd.DataFrame, output_dir: str) ->
     if history_df.empty:
         return
     label_column = "model_label" if "model_label" in history_df.columns else "model_file"
-    fig, ax = plt.subplots(figsize=(9, 5))
+    fig, ax = plt.subplots(figsize=(10, 5))
     for model_label, group in history_df.groupby(label_column):
         group = group.sort_values("round_index")
         window = max(1, len(group) // 100)
@@ -450,7 +698,7 @@ def _plot_training_learning_curves(history_df: pd.DataFrame, output_dir: str) ->
     ax.set_xlabel("Index de manche d'entraînement")
     ax.set_ylabel("Point de victoire (moyenne glissante)")
     ax.set_title("Courbes d'apprentissage cumulées")
-    ax.legend(fontsize=7)
+    ax.legend(fontsize=7, ncol=2)
     _savefig(fig, output_dir, "training_learning_curves.png")
 
 
@@ -489,10 +737,8 @@ def _plot_missed_interception_rate(
         return
     group_column = "source_label" if "source_label" in interception_broadcast_df.columns else "source_file"
     broadcasts = interception_broadcast_df.sort_values([group_column, "game_id", "round_id", "timestamp"])
-    resolutions = interception_resolved_df.sort_values(
-        [group_column if group_column in interception_resolved_df.columns else "source_file", "game_id", "round_id", "timestamp"]
-    )
     resolve_group_column = group_column if group_column in interception_resolved_df.columns else "source_file"
+    resolutions = interception_resolved_df.sort_values([resolve_group_column, "game_id", "round_id", "timestamp"])
     merged = pd.merge_asof(
         broadcasts, resolutions[[resolve_group_column, "game_id", "round_id", "timestamp", "interceptor_id"]],
         on="timestamp", by=[resolve_group_column, "game_id", "round_id"], direction="forward",
@@ -585,6 +831,293 @@ def _plot_combo_power_bubble(action_played_df: pd.DataFrame, output_dir: str) ->
     fig.write_html(os.path.join(output_dir, "combo_power_bubble.html"))
 
 
+def _plot_learning_rate_sweep(sweep_df: pd.DataFrame, output_dir: str) -> None:
+    """Performance finale d'entraînement par taux d'apprentissage testé (boîtes à moustaches)."""
+    if sweep_df.empty or "learning_rate" not in sweep_df.columns or "final_vp_mean" not in sweep_df.columns:
+        return
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ordered = sweep_df.sort_values("learning_rate")
+    hue_column = "opponent_pool" if "opponent_pool" in ordered.columns else None
+    sns.boxplot(data=ordered, x="learning_rate", y="final_vp_mean", hue=hue_column, ax=ax)
+    ax.set_xlabel("Taux d'apprentissage")
+    ax.set_ylabel("VP moyen final (fin d'entraînement)")
+    ax.set_title("Performance finale selon le taux d'apprentissage et le pool d'adversaires")
+    if hue_column:
+        ax.legend(title="Pool", fontsize=8)
+    _savefig(fig, output_dir, "learning_rate_final_performance_boxplot.png")
+
+    if "player_count" in sweep_df.columns and sweep_df["player_count"].nunique() > 1:
+        fig, ax = plt.subplots(figsize=(9, 5))
+        sns.lineplot(data=sweep_df, x="learning_rate", y="final_vp_mean", hue="player_count", marker="o", ax=ax, errorbar=("ci", 95))
+        ax.set_xscale("log")
+        ax.set_xlabel("Taux d'apprentissage (échelle log)")
+        ax.set_ylabel("VP moyen final")
+        ax.set_title("VP final selon le taux d'apprentissage, par nombre de joueurs")
+        _savefig(fig, output_dir, "learning_rate_vs_vp_by_player_count.png")
+
+
+def _plot_tournament_results(tournament_df: pd.DataFrame, output_dir: str) -> None:
+    """VP cumulé moyen du tournoi linéaire contre neuronal, par nombre de joueurs."""
+    if tournament_df.empty or "cumulative_vp" not in tournament_df.columns:
+        return
+    fig, ax = plt.subplots(figsize=(8, 5))
+    sns.barplot(data=tournament_df, x="player_count", y="cumulative_vp", hue="profile", errorbar=("ci", 95), ax=ax)
+    ax.set_xlabel("Nombre de joueurs")
+    ax.set_ylabel("VP cumulé moyen")
+    ax.set_title("Tournoi direct : politique linéaire contre politique neuronale")
+    _savefig(fig, output_dir, "tournament_results_ci.png")
+
+
+def _plot_vp_convergence_check(finished_df: pd.DataFrame, output_dir: str) -> None:
+    """Vérifie la convergence empirique du VP moyen observé par rang vers la formule théorique du barème symétrique."""
+    if finished_df.empty or "vp_earned" not in finished_df.columns:
+        return
+    if "player_count" not in finished_df.columns:
+        return
+    records = []
+    for player_count, group in finished_df.groupby("player_count"):
+        empirical = group.groupby("rank")["vp_earned"].mean()
+        for rank, value in empirical.items():
+            try:
+                p_num = float(player_count) # type: ignore
+                r_num = float(rank) # type: ignore
+                theoretical = (p_num - 1.0) / 2.0 - r_num
+            except (ValueError, TypeError):
+                continue
+            records.append({
+                "player_count": player_count, "rank": rank,
+                "vp_empirique": float(value), "vp_theorique_symetrique": theoretical,
+            })
+    check_df = pd.DataFrame(records)
+    if check_df.empty:
+        return
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
+    sns.scatterplot(data=check_df, x="vp_theorique_symetrique", y="vp_empirique", hue="player_count", ax=axes[0], s=60)
+    lims = [check_df[["vp_theorique_symetrique", "vp_empirique"]].min().min(), check_df[["vp_theorique_symetrique", "vp_empirique"]].max().max()]
+    axes[0].plot(lims, lims, linestyle="--", color="grey")
+    axes[0].set_xlabel("VP théorique (barème symétrique)")
+    axes[0].set_ylabel("VP empirique moyen")
+    axes[0].set_title("Convergence empirique vers le barème théorique")
+    check_df["gap"] = check_df["vp_empirique"] - check_df["vp_theorique_symetrique"]
+    sns.barplot(data=check_df, x="rank", y="gap", hue="player_count", ax=axes[1])
+    axes[1].set_xlabel("Rang de sortie")
+    axes[1].set_ylabel("Écart empirique - théorique")
+    axes[1].set_title("Écart résiduel par rang")
+    fig.suptitle("Vérification de la convergence des points de victoire (mode symétrique)")
+    _savefig(fig, output_dir, "vp_convergence_check.png")
+
+
+def _plot_role_persistence_summary(matrix: pd.DataFrame, output_dir: str) -> None:
+    """Compare la persistance diagonale de rôle (probabilité de conserver son rôle d'une manche à l'autre) au seuil uniforme 1/5."""
+    if matrix.empty:
+        return
+    diagonal = pd.Series({role: matrix.loc[role, role] for role in matrix.index if role in matrix.columns})
+    if diagonal.empty:
+        return
+    fig, ax = plt.subplots(figsize=(8, 5))
+    colors = ["#2a9d8f" if value > 0.2 else "#e76f51" for value in diagonal.values]
+    ax.bar(list(diagonal.index), diagonal.tolist(), color=colors)
+    ax.axhline(0.2, linestyle="--", color="grey", label="Seuil uniforme (1/5)")
+    ax.set_xlabel("Rôle")
+    ax.set_ylabel("Probabilité de conservation du rôle")
+    ax.set_title("Persistance de rôle d'une manche à l'autre")
+    ax.tick_params(axis="x", rotation=20, labelsize=8)
+    ax.legend()
+    _savefig(fig, output_dir, "role_persistence_summary.png")
+
+
+# Balayage systématique de paramètres et graphiques transversaux
+
+def _plot_parameter_sweep(df: pd.DataFrame, output_dir: str) -> None:
+    """
+    Génère automatiquement un graphique de variation pour chaque couple (paramètre de configuration observé, métrique macro suivie).
+
+    Paramètre `df` : `DataFrame` portant des colonnes `config_*` (surcharges de `GameConfig` appliquées à chaque partie/combinaison) et
+    les colonnes de `_SWEEP_METRICS`, typiquement le manifeste combinatoire ou le résumé de simulation agrégé.
+    Paramètre `output_dir` : répertoire versionné de destination.
+    Retourne `None`. Effet de bord : écrit un fichier `.png` par combinaison paramètre/métrique disposant d'au moins deux valeurs
+    distinctes du paramètre et d'au moins deux valeurs distinctes de la métrique, garantissant que toute nouvelle dimension explorée par
+    `research.run_pipeline` se traduit automatiquement par de nouveaux graphiques sans modification de ce module.
+    """
+    if df.empty:
+        return
+    config_columns = [c for c in df.columns if c.startswith("config_")]
+    for config_col in config_columns:
+        param_name = config_col.replace("config_", "")
+        for metric_col, metric_label in _SWEEP_METRICS:
+            if metric_col not in df.columns:
+                continue
+            data = df[[config_col, metric_col]].dropna()
+            if data.empty or data[config_col].nunique() < 2 or data[metric_col].nunique() < 2:
+                continue
+            fig, ax = plt.subplots(figsize=(8, 5))
+            values = data[config_col]
+            unique_values = set(values.astype(str).unique())
+            try:
+                if unique_values <= {"True", "False"} or values.dtype == bool:
+                    sns.barplot(data=data, x=config_col, y=metric_col, errorbar=("ci", 95), ax=ax)
+                elif pd.api.types.is_numeric_dtype(values) and values.nunique() > 4:
+                    sns.regplot(data=data, x=config_col, y=metric_col, ax=ax, scatter_kws={"alpha": 0.35})
+                else:
+                    sns.boxplot(data=data, x=config_col, y=metric_col, ax=ax)
+            except Exception:
+                plt.close(fig)
+                continue
+            ax.set_xlabel(param_name)
+            ax.set_ylabel(metric_label)
+            ax.set_title(f"{metric_label} selon {param_name}")
+            ax.tick_params(axis="x", rotation=20, labelsize=8)
+            _savefig(fig, output_dir, f"sweep_{param_name}_vs_{metric_col}.png")
+
+
+def _plot_parameter_impact_heatmap(df: pd.DataFrame, output_dir: str) -> None:
+    """
+    Construit une heatmap résumant l'impact différentiel (`True` moins `False`) de chaque paramètre booléen sur chaque métrique macro.
+
+    Paramètre `df` : `DataFrame` portant des colonnes `config_*` booléennes et les colonnes de `_SWEEP_METRICS`.
+    Paramètre `output_dir` : répertoire versionné de destination.
+    Retourne `None`. Effet de bord : écrit un unique fichier `.png` de synthèse. Aucune valeur intermédiaire n'est recalculée par
+    ailleurs, ce graphique résume en une seule vue l'ensemble des graphiques individuels produits par `_plot_parameter_sweep` pour les
+    paramètres booléens.
+    """
+    if df.empty:
+        return
+    config_columns = [c for c in df.columns if c.startswith("config_")]
+    bool_columns = [c for c in config_columns if set(df[c].dropna().astype(str).unique()) <= {"True", "False"}]
+    if not bool_columns:
+        return
+    rows = []
+    for col in bool_columns:
+        row: Dict[str, Any] = {"parameter": col.replace("config_", "")}
+        for metric_col, _ in _SWEEP_METRICS:
+            if metric_col not in df.columns:
+                continue
+            true_mean = df.loc[df[col].astype(str) == "True", metric_col].mean()
+            false_mean = df.loc[df[col].astype(str) == "False", metric_col].mean()
+            row[metric_col] = float(true_mean - false_mean) if pd.notna(true_mean) and pd.notna(false_mean) else None
+        rows.append(row)
+    matrix = pd.DataFrame(rows).set_index("parameter").astype(float)
+    matrix = matrix.dropna(how="all")
+    if matrix.empty:
+        return
+    fig, ax = plt.subplots(figsize=(9, max(4, 0.4 * len(matrix))))
+    sns.heatmap(matrix, annot=True, fmt=".2f", cmap="coolwarm", center=0, ax=ax)
+    ax.set_xlabel("Métrique")
+    ax.set_ylabel("Paramètre booléen")
+    ax.set_title("Impact différentiel (activé - désactivé) de chaque paramètre sur chaque métrique")
+    _savefig(fig, output_dir, "parameter_impact_heatmap.png")
+
+
+def _plot_metric_correlation_heatmap(df: pd.DataFrame, output_dir: str) -> None:
+    """Heatmap de corrélation entre les métriques macro suivies."""
+    metric_cols = [m for m, _ in _SWEEP_METRICS if m in df.columns]
+    if len(metric_cols) < 2:
+        return
+    numeric_df = df[metric_cols].dropna()
+    if numeric_df.shape[0] < 3:
+        return
+    corr = numeric_df.corr()
+    fig, ax = plt.subplots(figsize=(7, 6))
+    sns.heatmap(corr, annot=True, fmt=".2f", cmap="vlag", vmin=-1, vmax=1, ax=ax)
+    ax.set_title("Corrélations entre métriques macro")
+    _savefig(fig, output_dir, "metric_correlation_heatmap.png")
+
+
+def _plot_metric_pairplot(df: pd.DataFrame, output_dir: str) -> None:
+    """Relations croisées entre métriques macro, colorées par nombre de joueurs (pairplot)."""
+    metric_cols = [m for m, _ in _SWEEP_METRICS if m in df.columns]
+    if len(metric_cols) < 2 or df.empty:
+        return
+    columns = metric_cols + (["player_count"] if "player_count" in df.columns else [])
+    plot_df = df[columns].dropna()
+    if plot_df.shape[0] < 5:
+        return
+    hue = "player_count" if "player_count" in plot_df.columns and plot_df["player_count"].nunique() > 1 else None
+    try:
+        grid = sns.pairplot(plot_df, hue=hue, diag_kind="kde", plot_kws={"alpha": 0.5, "s": 20})
+    except Exception:
+        return
+    grid.fig.suptitle("Relations croisées entre métriques macro", y=1.02)
+    os.makedirs(output_dir, exist_ok=True)
+    grid.savefig(os.path.join(output_dir, "metric_pairplot.png"), dpi=150)
+    plt.close(grid.fig)
+
+
+def _plot_parallel_coordinates(df: pd.DataFrame, output_dir: str) -> None:
+    """Coordonnées parallèles interactives des métriques macro par nombre de joueurs."""
+    metric_cols = [m for m, _ in _SWEEP_METRICS if m in df.columns]
+    if not metric_cols or df.empty or "player_count" not in df.columns:
+        return
+    plot_df = df[["player_count"] + metric_cols].dropna()
+    if plot_df.empty:
+        return
+    fig = px.parallel_coordinates(
+        plot_df, color="player_count", dimensions=["player_count"] + metric_cols,
+        color_continuous_scale=px.colors.diverging.Tealrose,
+        title="Coordonnées parallèles : métriques macro par nombre de joueurs",
+    )
+    os.makedirs(output_dir, exist_ok=True)
+    fig.write_html(os.path.join(output_dir, "metric_parallel_coordinates.html"))
+
+
+def _plot_profile_radar(profile_summary_df: pd.DataFrame, output_dir: str) -> None:
+    """Radar comparatif normalisé des profils d'agent sur plusieurs métriques de performance."""
+    if profile_summary_df.empty:
+        return
+    metrics = ["win_rate", "mean_vp", "president_rate", "mean_branching", "action_validity_rate"]
+    available = [m for m in metrics if m in profile_summary_df.columns and profile_summary_df[m].notna().any()]
+    if len(available) < 3:
+        return
+    normalized = profile_summary_df.dropna(subset=["profile"]).copy()
+    for metric in available:
+        span = normalized[metric].max() - normalized[metric].min()
+        normalized[metric] = (normalized[metric] - normalized[metric].min()) / span if span > 0 else 0.5
+    fig = go.Figure()
+    for _, row in normalized.iterrows():
+        values = [row[metric] if pd.notna(row[metric]) else 0.0 for metric in available]
+        fig.add_trace(go.Scatterpolar(
+            r=values + [values[0]], theta=available + [available[0]], fill="toself", name=str(row["profile"]),
+        ))
+    fig.update_layout(
+        title="Profil comparatif normalisé par agent (radar)",
+        polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
+    )
+    os.makedirs(output_dir, exist_ok=True)
+    fig.write_html(os.path.join(output_dir, "profile_comparison_radar.html"))
+
+
+def _plot_branching_by_profile(profile_long_df: pd.DataFrame, output_dir: str) -> None:
+    """Facteur de branchement moyen par profil d'agent réel, avec intervalle de confiance."""
+    if profile_long_df.empty or "branching_factor" not in profile_long_df.columns:
+        return
+    data = profile_long_df.dropna(subset=["branching_factor", "profile"])
+    if data.empty:
+        return
+    fig, ax = plt.subplots(figsize=(9, 5))
+    sns.barplot(data=data, x="profile", y="branching_factor", errorbar=("ci", 95), ax=ax)
+    ax.set_xlabel("Profil d'agent")
+    ax.set_ylabel("Facteur de branchement moyen")
+    ax.set_title("Facteur de branchement moyen par profil d'agent")
+    ax.tick_params(axis="x", rotation=30, labelsize=8)
+    _savefig(fig, output_dir, "branching_factor_by_profile_ci.png")
+
+
+def _plot_vp_by_profile_violin(profile_long_df: pd.DataFrame, output_dir: str) -> None:
+    """Distribution du VP cumulé par partie (données de référence), par profil d'agent réel."""
+    if profile_long_df.empty or "cumulative_vp" not in profile_long_df.columns:
+        return
+    data = profile_long_df.dropna(subset=["cumulative_vp", "profile"])
+    if data.empty:
+        return
+    fig, ax = plt.subplots(figsize=(9, 5))
+    sns.violinplot(data=data, x="profile", y="cumulative_vp", ax=ax, inner="quartile")
+    ax.set_xlabel("Profil d'agent")
+    ax.set_ylabel("VP cumulé par partie (données de référence)")
+    ax.set_title("Distribution du VP cumulé par profil (simulations de référence)")
+    ax.tick_params(axis="x", rotation=30, labelsize=8)
+    _savefig(fig, output_dir, "vp_by_profile_violin.png")
+
+
 def _next_figure_version(output_root: str) -> int:
     """
     Détermine le prochain numéro de version de graphiques à utiliser.
@@ -610,9 +1143,11 @@ def generate_all(output_root: str = FIGURE_DIR) -> int:
 
     Paramètre `output_root` : répertoire racine dans lequel écrire les figures, versionné en interne.
     Retourne le numéro de version sous lequel les figures ont été écrites (`output_root/v<N>/`). Effet de bord : lit l'ensemble des
-    fichiers Parquet/CSV disponibles, écrit les figures produites dans un nouveau sous-répertoire versionné, sans jamais recouvrir une
-    version antérieure, et met à jour le pointeur de convenance `output_root/LATEST_VERSION.txt`. Chaque graphique individuel est protégé
-    par une garde d'absence de données ; l'absence d'une source de données n'empêche pas la génération des autres graphiques.
+    fichiers Parquet/CSV disponibles une seule fois chacun, construit les tableaux dérivés une seule fois (notamment le tableau long
+    profil/joueur/partie et le résumé comparatif par profil, réutilisés par plusieurs graphiques), écrit les figures produites dans un
+    nouveau sous-répertoire versionné sans jamais recouvrir une version antérieure, et met à jour le pointeur de convenance
+    `output_root/LATEST_VERSION.txt`. Chaque graphique individuel est protégé par une garde d'absence de données ; l'absence d'une source
+    de données n'empêche pas la génération des autres graphiques.
     """
     os.makedirs(output_root, exist_ok=True)
     version = _next_figure_version(output_root)
@@ -631,37 +1166,40 @@ def generate_all(output_root: str = FIGURE_DIR) -> int:
     interception_broadcast_df = _expand_payload(events_df, "EventInterceptionBroadcast")
     interception_resolved_df = _expand_payload(events_df, "EventInterceptionResolved")
 
-    if not action_played_df.empty and "source_file" in action_played_df.columns:
-        action_played_df = action_played_df.copy()
-        action_played_df["source_label"] = action_played_df["source_file"].apply(_short_source_label)
-    if not interception_broadcast_df.empty and "source_file" in interception_broadcast_df.columns:
-        interception_broadcast_df = interception_broadcast_df.copy()
-        interception_broadcast_df["source_label"] = interception_broadcast_df["source_file"].apply(_short_source_label)
-    if not interception_resolved_df.empty and "source_file" in interception_resolved_df.columns:
-        interception_resolved_df = interception_resolved_df.copy()
-        interception_resolved_df["source_label"] = interception_resolved_df["source_file"].apply(_short_source_label)
+    for frame in (action_played_df, interception_broadcast_df, interception_resolved_df):
+        if not frame.empty and "source_file" in frame.columns:
+            frame["source_label"] = frame["source_file"].apply(_short_source_label)
 
     summary_df = _load_summary_csvs()
     manifest_df = _load_grid_manifests()
     history_df = _load_training_histories()
     if not history_df.empty and "model_file" in history_df.columns:
-        history_df = history_df.copy()
         history_df["model_label"] = history_df["model_file"].apply(_short_model_label)
     evaluation_df = _load_evaluation_csvs()
     if not evaluation_df.empty and "profile" in evaluation_df.columns:
-        evaluation_df = evaluation_df.copy()
         evaluation_df["profile_label"] = evaluation_df["profile"].apply(lambda p: _truncate_label(str(p), 18))
+    tournament_df = _load_tournament_csvs()
     lr_sweep_df = _load_learning_rate_sweep()
 
+    # Tableaux dérivés calculés une seule fois et réutilisés par l'ensemble des graphiques concernés.
+    profile_long_df = _build_profile_long_df(summary_df)
+    profile_summary_df = _build_profile_summary(profile_long_df, evaluation_df)
+    role_matrix = _role_transition_matrix(round_end_df)
+    metrics_source_df = manifest_df if not manifest_df.empty else summary_df
+
+    # Graphiques historiques, corrigés.
     _plot_vp_by_rank_violin(finished_df, version_dir)
-    _plot_win_rate_by_player(finished_df, version_dir)
-    _plot_suboptimal_pass_rate(action_played_df, version_dir)
-    _plot_role_transition_heatmap(_role_transition_matrix(round_end_df), version_dir)
+    _plot_win_rate_by_profile(profile_long_df, version_dir)
+    _plot_suboptimal_pass_rate(action_played_df, profile_long_df, version_dir)
+    _plot_action_validity_by_profile(profile_long_df, version_dir)
+    _plot_role_transition_heatmap(role_matrix, version_dir)
+    _plot_role_distribution_by_profile(round_end_df, profile_long_df, version_dir)
+    _plot_role_persistence_summary(role_matrix, version_dir)
     _plot_gini_histogram(round_start_df, version_dir)
-    _plot_branching_factor_vs_players(manifest_df if not manifest_df.empty else summary_df, version_dir)
-    _plot_combo_size_distribution(action_played_df, version_dir)
+    _plot_branching_factor_vs_players(metrics_source_df, version_dir)
+    _plot_combo_size_distribution(action_played_df, profile_long_df, version_dir)
     _plot_actions_per_round_violin(action_played_df, version_dir)
-    _plot_e_rev_volatility_regression(manifest_df if not manifest_df.empty else summary_df, version_dir)
+    _plot_e_rev_volatility_regression(metrics_source_df, version_dir)
     _plot_opening_position_rank_regression(trick_start_df, finished_df, version_dir)
     _plot_rule_trigger_counts(rule_triggered_df, version_dir)
     _plot_training_learning_curves(history_df, version_dir)
@@ -672,6 +1210,18 @@ def generate_all(output_root: str = FIGURE_DIR) -> int:
     _plot_evaluation_president_rate(evaluation_df, version_dir)
     _plot_combo_power_bubble(action_played_df, version_dir)
     _plot_learning_rate_sweep(lr_sweep_df, version_dir)
+    _plot_tournament_results(tournament_df, version_dir)
+    _plot_vp_convergence_check(finished_df, version_dir)
+
+    # Graphiques transversaux et balayage systématique de paramètres.
+    _plot_branching_by_profile(profile_long_df, version_dir)
+    _plot_vp_by_profile_violin(profile_long_df, version_dir)
+    _plot_metric_correlation_heatmap(metrics_source_df, version_dir)
+    _plot_metric_pairplot(metrics_source_df, version_dir)
+    _plot_parallel_coordinates(metrics_source_df, version_dir)
+    _plot_profile_radar(profile_summary_df, version_dir)
+    _plot_parameter_impact_heatmap(metrics_source_df, version_dir)
+    _plot_parameter_sweep(metrics_source_df, version_dir)
 
     with open(os.path.join(output_root, "LATEST_VERSION.txt"), "w", encoding="utf-8") as handle:
         handle.write(str(version))

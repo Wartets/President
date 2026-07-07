@@ -16,6 +16,7 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import argparse
+import json
 import os
 import shutil
 import time
@@ -39,7 +40,7 @@ from analytics.metrics_calc import (
 from core.config import GameConfig
 from core.math_utils import f_std
 from engine.game_runner import Game
-from events.structural import EventRoundStart
+from events.structural import EventPlayerFinished, EventRoundStart
 from registry.agent_registry import (
     ALL_AUTOMATED_PROFILES, AUTOMATED_AGENT_REGISTRY, TRAINED_AGENT_PROFILES, build_agent,
 )
@@ -224,20 +225,24 @@ class GameSimulationWorker:
         overrides = config_overrides or {}
         all_records: List[dict] = []
         summary_rows: List[dict] = []
+        base_profiles = list(seat_profiles) if seat_profiles is not None else [self.agent_profile] * player_count
+        from analytics.metrics_calc import sub_optimal_pass_rate
+
         for offset in range(game_count):
             seed = base_seed + offset
             config = GameConfig(random_seed=seed, player_count=player_count, **overrides)
             seat_rng = random.Random(f"{seed}:seat_shuffle")
-            agents = _build_agents(
-                self.agent_profile, config, weights_path, seat_profiles, seat_weights,
-                randomize_seats=True, seat_rng=seat_rng,
+            shuffled_profiles, shuffled_weights = _shuffled_seat_assignment(
+                base_profiles, dict(seat_weights or {}), weights_path, 0, seat_rng,
             )
+            agents = _build_agents(self.agent_profile, config, None, shuffled_profiles, shuffled_weights)
             logger = EventLogger()
             from engine.event_bus import EventBus
 
             bus = EventBus()
             bus.subscribe(logger)
-            game = Game(config, agents, event_bus=bus, game_id=f"sim-{seed}")
+            game_id = f"sim-{seed}"
+            game = Game(config, agents, event_bus=bus, game_id=game_id)
             game.play_rounds(rounds_per_game)
 
             gini_values: List[float] = []
@@ -248,11 +253,30 @@ class GameSimulationWorker:
                 }
                 gini_values.append(gini_initial_hand_power(hand_powers))
 
+            # Association durable identité d'agent / siège, indépendante du mélange aléatoire des sièges
+            # d'une partie à l'autre, afin que toute analyse ultérieure regroupe par profil réel plutôt
+            # que par identifiant de joueur (qui change d'agent occupant d'une partie à l'autre).
+            player_profiles = {pid: shuffled_profiles[pid] for pid in range(player_count)}
+            last_round_id = rounds_per_game - 1
+            player_ranks: Dict[int, Optional[int]] = {pid: None for pid in range(player_count)}
+            for event in logger.events_of_type(EventPlayerFinished):
+                if event.round_id == last_round_id:
+                    player_ranks[event.player_id] = event.rank
+            player_suboptimal = {pid: sub_optimal_pass_rate(logger, pid) for pid in range(player_count)}
+            player_branching = {pid: branching_factor_average(logger, pid) for pid in range(player_count)}
+            player_cumulative_vp = {pid: float(game.cumulative_vp.get(pid, 0.0)) for pid in range(player_count)}
+
             summary_rows.append({
                 "seed": seed,
+                "game_id": game_id,
                 "player_count": player_count,
                 "agent_profile": self.agent_profile,
-                "seat_profiles": ",".join(seat_profiles) if seat_profiles else self.agent_profile,
+                "seat_profiles": ",".join(base_profiles),
+                "player_profiles": json.dumps(player_profiles),
+                "player_ranks": json.dumps(player_ranks),
+                "player_suboptimal_rate": json.dumps(player_suboptimal),
+                "player_branching": json.dumps(player_branching),
+                "player_cumulative_vp": json.dumps(player_cumulative_vp),
                 "rounds_per_game": rounds_per_game,
                 "branching_factor_average": branching_factor_average(logger),
                 "action_space_entropy": action_space_entropy(logger),

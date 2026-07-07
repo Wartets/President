@@ -78,7 +78,10 @@ class LiveMonitor:
         Retourne l'instance courante. Effet de bord : initialise `_start_time`, instancie et démarre `_live`.
         """
         self._start_time = time.time()
-        self._live = Live(self._render(), console=self.console, refresh_per_second=4)
+        self._live = Live(
+            self._render(), console=self.console, refresh_per_second=4,
+            vertical_overflow="crop", auto_refresh=True, transient=False,
+        )
         self._live.__enter__()
         return self
 
@@ -146,9 +149,12 @@ class LiveMonitor:
         cpu_percent = psutil.cpu_percent()
         mem_percent = psutil.virtual_memory().percent
 
-        table = Table(title=f"[{console_theme.STYLE_CAMPAIGN}]Campagne de simulation, suivi en temps réel[/{console_theme.STYLE_CAMPAIGN}]")
-        table.add_column("Métrique")
-        table.add_column("Valeur")
+        table = Table(
+            title=f"[{console_theme.STYLE_CAMPAIGN}]Campagne de simulation, suivi en temps réel[/{console_theme.STYLE_CAMPAIGN}]",
+            expand=True,
+        )
+        table.add_column("Métrique", ratio=2)
+        table.add_column("Valeur", ratio=3)
         table.add_row("Parties complétées", f"[bold]{self._games_completed}[/bold]")
         table.add_row("Parties / seconde", f"{fps:.2f}")
         table.add_row("Durée écoulée (s)", f"{elapsed:.1f}")

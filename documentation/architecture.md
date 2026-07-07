@@ -304,11 +304,29 @@ training.launch_distributed.launch(...)
 
 `research.run_pipeline.run_pipeline` est le point d'entrée unique orchestrant, sans intervention humaine, l'ensemble du cycle de recherche :
 entraînement de l'agent linéaire (`training.train_rl`), tentative d'entraînement distribué de l'agent neuronal (`training.launch_distributed`,
-ignorée proprement si Redis n'est pas joignable plutôt que de bloquer le pipeline), simulations de référence par profil heuristique
-(`research.run_simulation`), évaluation comparative (`research.evaluate_agent`), génération de graphiques (`research.generate_graphs`) et
-rédaction d'un rapport de synthèse. Chaque étape est journalisée dans `data/pipeline_state.json` avec un statut `"done"`/`"failed"` ; une
-étape déjà `"done"` n'est jamais réexécutée, ce qui permet de relancer le pipeline après une interruption (arrêt du processus, panne) sans
-perdre le travail déjà accompli. Une étape en échec ne bloque pas les étapes suivantes et est retentée au prochain lancement.
+ignorée proprement si Redis n'est pas joignable plutôt que de bloquer le pipeline), simulations de référence sur le produit cartésien de
+l'intégralité des profils heuristiques disponibles (hors `mcts_bot`), des nombres de joueurs et d'une grille de règles étendue générée
+automatiquement (`_build_extended_rule_presets`, voir section 12.1), évaluation comparative (`research.evaluate_agent`), recherche
+combinatoire (`research.run_combinatory`), tournoi direct politique linéaire/neuronale, vérification statistique automatisée, génération
+de graphiques (`research.generate_graphs`) et rédaction d'un rapport de synthèse. Chaque unité de travail (modèle, combinaison de
+référence, combinaison d'évaluation) est journalisée dans `data/pipeline_manifest.json` avec sa couverture cumulée en nombre de parties ;
+une combinaison jamais réinitialisée à zéro, seulement complétée, ce qui permet de relancer le pipeline après une interruption (arrêt du
+processus, panne) sans perdre le travail déjà accompli et sans jamais recalculer une combinaison déjà entièrement couverte à un niveau
+donné (la couverture peut néanmoins être étendue lors d'un lancement ultérieur). Une exception non gérée durant une étape est journalisée
+et n'empêche pas la sauvegarde de l'état accumulé jusqu'à ce point, ni la génération finale des graphiques et du rapport.
+
+### 12.1. Grille de paramètres étendue (`research.run_pipeline._build_extended_rule_presets`)
+
+Plutôt que de limiter la recherche automatisée à un petit nombre de présets nommés manuellement (`base`, `straights`, `full`, historiques),
+`research.run_pipeline` construit dynamiquement, au démarrage de chaque lancement, l'intégralité des combinaisons suivantes et les injecte
+dans le dictionnaire `research.run_simulation._RULE_PRESETS` partagé par `research.run_combinatory` et `research.evaluate_agent` : un
+préset `toggle_<champ>_on`/`toggle_<champ>_off` par champ booléen de `GameConfig` (isolant l'effet marginal de chaque règle), un préset
+par valeur de `vp_distribution_type` et de `pass_type`, plusieurs présets de rang magique et de rang de saut de tour, les deux types de
+pénalité de sortie, un préset par rôle ciblé par l'attribution stricte du reste, une configuration `everything_on`/`everything_off`, et
+24 combinaisons aléatoires reproductibles (graine fixe `"pipeline_random_grid_v1"`) capturant les interactions entre règles qu'un
+balayage strictement paramètre-par-paramètre ne peut pas révéler. Cette grille, injectée dynamiquement à l'exécution plutôt que codée en
+dur dans `research.run_simulation`, garantit que toute extension future de `GameConfig` (nouveau champ booléen ou énuméré) est
+automatiquement couverte par la prochaine exécution du pipeline sans modification manuelle de la grille.
 
 `research.generate_graphs.generate_all` est la contrepartie non interactive du carnet d'analyse historique : chaque fonction de tracé y est
 isolée et protégée par une garde d'absence de données, de sorte que l'indisponibilité d'une source (par exemple aucun événement
