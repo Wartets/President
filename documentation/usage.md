@@ -177,18 +177,18 @@ Toutes les options de `GameConfig` sont exposées en ligne de commande sur `play
 | :--- | :--- | :--- |
 | `--seed N` | `random_seed` | Graine de reproductibilité, réutilisée pour toute la distribution et tout tirage aléatoire de la partie. |
 | `--player-count N` | `player_count` | Nombre de joueurs, minimum 3 (`__post_init__` lève `ValueError` sinon). |
-| `--first-trick-opener-id N` | `first_trick_opener_id` | Joueur ouvrant le tout premier pli de la partie (manche d'index 0 uniquement ; les manches suivantes sont ouvertes par le `ROLE_SCUM` de la manche précédente, cf. [`rules.md`, §5.3](rules.md#53-phase-de-jeu-trick_phase), sous-section 5.3.1). |
+| `--first-trick-opener-id N` | `first_trick_opener_id` | Joueur ouvrant le tout premier pli de la partie (manche d'index 0 uniquement ; les manches suivantes sont ouvertes par le `ROLE_SCUM` de la manche précédente, cf. [`rules.md`, section 5.3](rules.md#53-phase-de-jeu-trick_phase), sous-section 5.3.1). |
 | `--disable-deck-scaling-auto` | `deck_scaling_auto=False` | Désactive le calcul automatique du nombre de paquets $N_D$. Doit être combiné avec `--forced-deck-count`. |
 | `--forced-deck-count N` | `forced_deck_count` | Nombre de paquets fixé manuellement, effectif uniquement si `deck_scaling_auto` est faux. |
 | `--pass-type {HARD_ONLY,ALLOW_SOFT}` | `pass_type` | Sémantique de passe pour toute la partie. `HARD_ONLY` exclut définitivement un joueur passé du pli en cours ; `ALLOW_SOFT` lui permet de resurenchérir si le tour lui revient dans le même pli. |
-| `--vp-distribution {LEGACY_STEPPED,LINEAR,SYMMETRICAL}` | `vp_distribution_type` | Barème de points de victoire (cf. [`rules.md`](rules.md) §4). `SYMMETRICAL` est recommandé pour l'entraînement (centré sur zéro, sans rupture de pente). |
+| `--vp-distribution {LEGACY_STEPPED,LINEAR,SYMMETRICAL}` | `vp_distribution_type` | Barème de points de victoire (cf. [`rules.md`](rules.md) section 4). `SYMMETRICAL` est recommandé pour l'entraînement (centré sur zéro, sans rupture de pente). |
 | `--disable-jokers` | `use_jokers=False` | Retire les Jokers du paquet. |
 | `--disable-magic-two` | `magic_two=False` | Désactive la clôture magique historique sur le 2. |
 | `--disable-magic-two-single-clears-all` | `magic_two_single_clears_all=False` | Un 2 seul ne clôture plus un pli de taille supérieure à 1. |
 | `--magic-card-enabled` | `magic_card_enabled=True` | Généralise la clôture magique à un rang paramétrable via `--magic-card-rank`. |
 | `--magic-card-rank R` | `magic_card_rank` | Rang magique (`3` à `2`, hors `JOKER`). |
 | `--disable-magic-single-clears-all` | `magic_single_clears_all=False` | Variante à un rang paramétrable de la règle de clôture par carte unique. |
-| `--skip-on-equal` | `skip_on_equal=True` | Force une réponse de puissance strictement égale après une égalité déclarée (cf. [`rules.md`, §6.3](rules.md#63-forçage-par-égalité-skip_on_equal)). |
+| `--skip-on-equal` | `skip_on_equal=True` | Force une réponse de puissance strictement égale après une égalité déclarée (cf. [`rules.md`, section 6.3](rules.md#63-forçage-par-égalité-skip_on_equal)). |
 | `--disable-revolution` | `revolution_enabled=False` | Désactive la Révolution. |
 | `--double-revolution-enabled` | `double_revolution_enabled=True` | Active la Double Révolution. Nécessite un nombre de paquets effectif ≥ 2, sous peine de `ValueError` au démarrage. |
 | `--straights-enabled` | `straights_enabled=True` | Active les combinaisons de type suite. |
@@ -902,7 +902,7 @@ Le profil demandé n'existe pas dans `_AGENT_REGISTRY` de `play_game.py`. Les pr
 Vérifier que le profil du siège concerné est bien `human` dans `--seats`, et que le nombre de profils correspond exactement à `--player-count`.
 
 **`RuntimeError: État incohérent détecté : pli ... dépasse ... actions sans clôture.`**
-Cette garde de sécurité, définie dans `engine.round.run_round` (`_MAX_ACTIONS_PER_TRICK`), signale une configuration de règles produisant un pli qui ne se clôture jamais (typiquement `pass_type` mal choisi conjointement à `skip_on_equal`, cf. [`rules.md`](rules.md) §6.3, note de cohérence). Vérifier la cohérence de `--pass-type` avec les autres règles actives, en particulier `skip_on_equal` et `finish_penalty_extended`.
+Cette garde de sécurité, définie dans `engine.round.run_round` (`_MAX_ACTIONS_PER_TRICK`), signale une configuration de règles produisant un pli qui ne se clôture jamais (typiquement `pass_type` mal choisi conjointement à `skip_on_equal`, cf. [`rules.md`](rules.md) section 6.3, note de cohérence). Vérifier la cohérence de `--pass-type` avec les autres règles actives, en particulier `skip_on_equal` et `finish_penalty_extended`.
 
 **`ImportError` sur `pynvml` lors de l'utilisation de `LiveMonitor`**
 Sans effet bloquant : `_try_init_nvml` capture l'absence du paquet ou l'échec d'initialisation et affiche `indisponible` pour la métrique GPU. Installer `pynvml` (déjà listé dans `requirements.txt`) et disposer d'un pilote NVIDIA compatible pour obtenir la métrique réelle.

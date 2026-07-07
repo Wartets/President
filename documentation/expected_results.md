@@ -7,7 +7,7 @@ des tests de validation (assertions sur bornes, signes de corrélation, ordres d
 ## 1. Distribution des VP par rang de sortie (`vp_by_rank_violin.png`)
 
 Attendu : décroissance monotone (au sens large) du VP moyen avec le rang de sortie $k$, quel que soit le barème (`LEGACY_STEPPED`, `LINEAR`,
-`SYMMETRICAL`, définis dans [`rules.md`, §4](rules.md#4-rôles-et-points-de-victoire-victorypoints)). En mode `SYMMETRICAL` avec $N$ joueurs, la moyenne empirique de chaque rang doit converger vers $VP(k) = (N-1)/2 - k$ à mesure
+`SYMMETRICAL`, définis dans [`rules.md`, section 4](rules.md#4-rôles-et-points-de-victoire-victorypoints)). En mode `SYMMETRICAL` avec $N$ joueurs, la moyenne empirique de chaque rang doit converger vers $VP(k) = (N-1)/2 - k$ à mesure
 que le nombre de manches augmente, avec une variance non nulle uniquement due à la composition de rôles pour les rangs neutres si $N > 4$.
 Test de validation : `|moyenne_empirique(k) - VP(k)| < tolérance` décroissante avec le nombre de manches (loi des grands nombres).
 
@@ -28,15 +28,15 @@ des options réellement légales. Test : `sub_optimal_pass_rate == 0.0` pour `Gr
 ## 4. Matrice de transition des rôles (`role_transition_heatmap.png`)
 
 Attendu : la diagonale (`ROLE_PRESIDENT → ROLE_PRESIDENT`, `ROLE_SCUM → ROLE_SCUM`) doit présenter une probabilité strictement supérieure à
-$1/5$ (persistance de rôle, due à l'avantage structurel de l'échange de cartes décrit en [`rules.md`, §5.2](rules.md#52-échange-exchange_phase)), sous réserve que `putsch_enabled` soit désactivé ou peu
-invoqué (voir [`rules.md`, §6.1](rules.md#61-modificateurs-de-pré-manche-pre_round_modifiers)). Chaque ligne doit sommer à 1 (loi de probabilité totale). Test : `abs(matrix.sum(axis=1) - 1.0) < 1e-9` pour chaque ligne non vide.
+$1/5$ (persistance de rôle, due à l'avantage structurel de l'échange de cartes décrit en [`rules.md`, section 5.2](rules.md#52-échange-exchange_phase)), sous réserve que `putsch_enabled` soit désactivé ou peu
+invoqué (voir [`rules.md`, section 6.1](rules.md#61-modificateurs-de-pré-manche-pre_round_modifiers)). Chaque ligne doit sommer à 1 (loi de probabilité totale). Test : `abs(matrix.sum(axis=1) - 1.0) < 1e-9` pour chaque ligne non vide.
 
 ## 5. Indice de Gini de la puissance de main initiale (`gini_hand_power_histogram.png`)
 
 Attendu : une distribution centrée et concentrée autour d'une valeur faible à modérée (typiquement $[0.05, 0.25]$ pour une distribution
-aléatoire uniforme des cartes, cf. [`rules.md`, §5.1](rules.md#51-phase-initiale)), jamais nulle (l'inégalité résiduelle entre mains est structurelle à toute distribution finie), jamais proche
+aléatoire uniforme des cartes, cf. [`rules.md`, section 5.1](rules.md#51-phase-initiale)), jamais nulle (l'inégalité résiduelle entre mains est structurelle à toute distribution finie), jamais proche
 de 1 (qui signalerait une distribution des cartes gravement biaisée). Test : `0 < gini_moyen < 0.35` sur un grand échantillon de manches en
-distribution non truquée (`strict_remainder_allocation=False`, voir [`rules.md`, §6.1](rules.md#61-modificateurs-de-pré-manche-pre_round_modifiers)).
+distribution non truquée (`strict_remainder_allocation=False`, voir [`rules.md`, section 6.1](rules.md#61-modificateurs-de-pré-manche-pre_round_modifiers)).
 
 ## 6. Facteur de branchement moyen vs nombre de joueurs (`branching_factor_vs_player_count.png`)
 
@@ -64,7 +64,7 @@ Attendu : la longueur moyenne d'un pli est bornée par $N$ (au plus $N$ actions 
 ## 9. Volatilité de la Révolution vs nombre de joueurs (`e_rev_volatility_vs_players.png`)
 
 Attendu : corrélation positive entre le nombre de joueurs et la volatilité (plus de joueurs → plus de paquets → plus de cartes du même rang
-disponibles → plus de combinaisons de taille $\ge 4$ jouables, déclencheur défini en [`rules.md`, §6.5](rules.md#65-révolution-et-double-révolution-revolution_enabled-double_revolution_enabled)). Test : coefficient de régression positif et statistiquement significatif sur
+disponibles → plus de combinaisons de taille $\ge 4$ jouables, déclencheur défini en [`rules.md`, section 6.5](rules.md#65-révolution-et-double-révolution-revolution_enabled-double_revolution_enabled)). Test : coefficient de régression positif et statistiquement significatif sur
 un grand échantillon.
 
 ## 10. Corrélation position d'ouverture / rang de sortie (`opening_position_rank_regression.png`)
@@ -76,7 +76,7 @@ pli de la toute première manche). Test : `|r| < 0.1` sur un grand nombre de man
 ## 11. Fréquence des règles déclenchées (`rule_trigger_counts.png`)
 
 Attendu : présence uniquement des règles effectivement activées par `GameConfig` pour la campagne considérée ; absence totale d'occurrences
-d'une règle désactivée (ex : aucun `SKIP_TURN` si `skip_turn_enabled=False`, règle définie en [`rules.md`, §6.7](rules.md#67-saut-de-tour-skip_turn_enabled)). Les noms de règles possibles sont énumérés dans la [matrice de compatibilité (§7)](rules.md#7-matrice-de-compatibilité-et-résolution-des-conflits-truth-table). Test : `set(rule_triggered_df.rule_name.unique()) ⊆
+d'une règle désactivée (ex : aucun `SKIP_TURN` si `skip_turn_enabled=False`, règle définie en [`rules.md`, section 6.7](rules.md#67-saut-de-tour-skip_turn_enabled)). Les noms de règles possibles sont énumérés dans la [matrice de compatibilité (section 7)](rules.md#7-matrice-de-compatibilité-et-résolution-des-conflits-truth-table). Test : `set(rule_triggered_df.rule_name.unique()) ⊆
 règles_activées_par_config`.
 
 ## 12. Courbes d'apprentissage (`training_learning_curves.png`)
@@ -87,9 +87,9 @@ manches strictement supérieur au VP moyen des 10 % premières manches, à epsil
 
 ## 13. Efficacité du Putsch (`putsch_efficiency_ci.png`)
 
-Attendu : sous la condition mathématique $P_{putsch}$ (main favorable, définie en [`rules.md`, §5.1](rules.md#51-phase-initiale), sous-section 5.1.2), le taux de victoire du rôle `ROLE_SCUM` sollicité doit être
+Attendu : sous la condition mathématique $P_{putsch}$ (main favorable, définie en [`rules.md`, section 5.1](rules.md#51-phase-initiale), sous-section 5.1.2), le taux de victoire du rôle `ROLE_SCUM` sollicité doit être
 supérieur ou égal lorsque le Putsch est invoqué que lorsqu'il ne l'est pas, puisque la condition n'est vérifiée avant sollicitation que
-lorsque la main est déjà favorable ; l'invocation ajoute la conservation de cette main favorable en évitant l'échange désavantageux (voir [`rules.md`, §6.1](rules.md#61-modificateurs-de-pré-manche-pre_round_modifiers)). Test :
+lorsque la main est déjà favorable ; l'invocation ajoute la conservation de cette main favorable en évitant l'échange désavantageux (voir [`rules.md`, section 6.1](rules.md#61-modificateurs-de-pré-manche-pre_round_modifiers)). Test :
 `taux_victoire(invoqué) >= taux_victoire(non_invoqué)` à tolérance statistique près.
 
 ## 14. Corrélation poids de la taxe d'échange / VP du destinataire (`tax_weight_vp_regression.html`)
@@ -107,7 +107,7 @@ les agents à décision partielle (`RuleBasedBot`, qui refuse en fin de manche).
 ## 16. Distribution de la magnitude du Saut de Tour (`skip_turn_magnitude_histogram.png`)
 
 Attendu : concentrée sur les tailles de combinaison réellement composées du rang `skip_turn_rank`, bornée par $N-1$ (nombre maximal de
-joueurs sautables, règle définie en [`rules.md`, §6.7](rules.md#67-saut-de-tour-skip_turn_enabled), résolution [F] et [H] de la [matrice de compatibilité (§7)](rules.md#7-matrice-de-compatibilité-et-résolution-des-conflits-truth-table)). Test : `max(magnitude) <= N - 1`.
+joueurs sautables, règle définie en [`rules.md`, section 6.7](rules.md#67-saut-de-tour-skip_turn_enabled), résolution [F] et [H] de la [matrice de compatibilité (section 7)](rules.md#7-matrice-de-compatibilité-et-résolution-des-conflits-truth-table)). Test : `max(magnitude) <= N - 1`.
 
 ## 17. Évaluation comparative des profils (`evaluation_vp_violin.png`, `evaluation_president_rate_ci.png`)
 

@@ -34,10 +34,10 @@ Ce document est la référence normative citée par [`architecture.md`](architec
 *   **`Round`** : Une manche de jeu. Débute par la distribution (`deal_cards`), passe par l'échange (`exchange_cards`) et se termine par la complétion (`round_closing`) lorsque $N-1$ joueurs ont l'attribut `hand_size == 0`.
 *   **`Trick`** : Un pli. Séquence d'actions (`Action`) débutant par une table vide et se terminant par un état de clôture (`is_closed == True`).
 *   **`Turn`** : L'opportunité d'action d'un `Player` $p_i$ à l'instant $t$.
-*   **`Action`** : Vecteur de décision émis par un agent. Énumération d'états d'action (`ACTION_PLAY`, `ACTION_SOFT_PASS`, `ACTION_HARD_PASS`), assorti d'un sous-ensemble de cartes $C$ et, lorsque nécessaire, d'une **intention de valeur** `declared_power` (obligatoire pour la résolution des Jokers, cf. §6.4 et Document 3 §2.B).
+*   **`Action`** : Vecteur de décision émis par un agent. Énumération d'états d'action (`ACTION_PLAY`, `ACTION_SOFT_PASS`, `ACTION_HARD_PASS`), assorti d'un sous-ensemble de cartes $C$ et, lorsque nécessaire, d'une **intention de valeur** `declared_power` (obligatoire pour la résolution des Jokers, cf. section 6.4 et Document 3 section 2.B).
 *   **`Card`** : Objet défini par un rang facial (`rank`), une couleur (`suit`), une valeur de puissance dynamique $f_{power}(c, E_{rev})$ et une valeur de points statique $f_{points}(c)$.
 *   **`Combination`** : Sous-ensemble $C \subset \text{Hand}$ de taille $X = |C|$.
-    *   Toutes les cartes $c \in C$ doivent satisfaire $f_{power}(c_a) == f_{power}(c_b)$ (hors utilisation de Jokers en tant que `Wildcard`, ou activation de la règle des Suites, cf. §6.6).
+    *   Toutes les cartes $c \in C$ doivent satisfaire $f_{power}(c_a) == f_{power}(c_b)$ (hors utilisation de Jokers en tant que `Wildcard`, ou activation de la règle des Suites, cf. section 6.6).
 
 ## 2. Configuration (`GameConfig`)
 
@@ -52,8 +52,8 @@ Objet de paramètres immuable passé à l'initialisation de la `Game`. Union exh
 *   `deck_scaling_auto` (bool) : Si `True`, le nombre de paquets $N_D$ est calculé dynamiquement.
 
 **Règles de Flux**
-*   `pass_type` (str) : `'HARD_ONLY'` (un passe exclut définitivement le joueur du pli en cours) ou `'ALLOW_SOFT'` (un passe autorise le joueur à ressurenchérir plus tard dans le même pli si le tour lui revient). Détermine laquelle des deux sémantiques d'`Action` (`ACTION_SOFT_PASS` / `ACTION_HARD_PASS`) est légale/forcée durant la partie (voir §5.3.2 et §6.3).
-*   `vp_distribution_type` (str) : `'SYMMETRICAL'` (par défaut, Z-score centré sur 0) ou `'LINEAR'` (voir §4).
+*   `pass_type` (str) : `'HARD_ONLY'` (un passe exclut définitivement le joueur du pli en cours) ou `'ALLOW_SOFT'` (un passe autorise le joueur à ressurenchérir plus tard dans le même pli si le tour lui revient). Détermine laquelle des deux sémantiques d'`Action` (`ACTION_SOFT_PASS` / `ACTION_HARD_PASS`) est légale/forcée durant la partie (voir section 5.3.2 et section 6.3).
+*   `vp_distribution_type` (str) : `'SYMMETRICAL'` (par défaut, Z-score centré sur 0) ou `'LINEAR'` (voir section 4).
 
 **Modificateurs de Jeu**
 *   `use_jokers` (bool) : Activation des Jokers.
@@ -78,7 +78,7 @@ Objet de paramètres immuable passé à l'initialisation de la `Game`. Union exh
 *   `finish_penalty_enabled` (bool) : Activation de la pénalité de sortie.
 *   `finish_penalty_type` (str) : `PENALTY_INSTANT_SCUM` ou `PENALTY_DRAW_CARDS`.
 *   `finish_penalty_draw_count` (int) : Nombre de cartes $K$ à piocher si `PENALTY_DRAW_CARDS`.
-*   `finish_penalty_extended` (bool) : Extension des conditions de pénalité (cf. §6.9), incluant les sous-conditions `no_finish_on_joker` et `no_finish_on_revolution`.
+*   `finish_penalty_extended` (bool) : Extension des conditions de pénalité (cf. section 6.9), incluant les sous-conditions `no_finish_on_joker` et `no_finish_on_revolution`.
 
 ## 3. Matériel, Dimensionnement et Hiérarchie Mathématique
 
@@ -117,11 +117,11 @@ Pour toute carte $c \neq Joker$, la puissance standard $f_{std}(c)$ est identiqu
 
 $$f_{power}(c, E_{rev}) = \begin{cases} 16 & \text{si } c = Joker \\ f_{std}(c) & \text{si } E_{rev} = False \\ 18 - f_{std}(c) & \text{si } E_{rev} = True \end{cases}$$
 
-Le mécanisme qui fait basculer $E_{rev}$ en cours de partie est détaillé en [§6.5](#65-révolution-et-double-révolution-revolution_enabled-double_revolution_enabled).
+Le mécanisme qui fait basculer $E_{rev}$ en cours de partie est détaillé en [section 6.5](#65-révolution-et-double-révolution-revolution_enabled-double_revolution_enabled).
 
 ## 4. Rôles et Points de Victoire (`VictoryPoints`)
 
-À la clôture de $R_m$, on obtient la liste de sortie $O = [p_{o_0}, p_{o_1}, ..., p_{o_{N-1}}]$, où l'index $k$ correspond à l'ordre de sortie ($k=0$ étant le premier joueur à finir). Cette liste $O$ est construite progressivement au fil de la manche et finalisée en [§5.4](#54-fin-de-manche-round_closing).
+À la clôture de $R_m$, on obtient la liste de sortie $O = [p_{o_0}, p_{o_1}, ..., p_{o_{N-1}}]$, où l'index $k$ correspond à l'ordre de sortie ($k=0$ étant le premier joueur à finir). Cette liste $O$ est construite progressivement au fil de la manche et finalisée en [section 5.4](#54-fin-de-manche-round_closing).
 
 **Attribution des rôles (indépendante du mode de calcul des VP) :**
 *   $k = 0$ : `ROLE_PRESIDENT`
@@ -177,7 +177,7 @@ Condition : Uniquement si $m > 0$ (où $m$ est l'index de la `Round` actuelle) *
 
 Soit $\max_{power}(H, n)$ la fonction retournant les $n$ cartes ayant le $f_{power}$ maximal.
 
-1.  `ROLE_SCUM` transfère $\max_{power}(H_{scum}, 2)$ au `ROLE_PRESIDENT` (ou une sélection aléatoire uniforme $rand(H_{scum}, 2)$ si `blind_tax_enabled == True`, cf. §6.1).
+1.  `ROLE_SCUM` transfère $\max_{power}(H_{scum}, 2)$ au `ROLE_PRESIDENT` (ou une sélection aléatoire uniforme $rand(H_{scum}, 2)$ si `blind_tax_enabled == True`, cf. section 6.1).
 2.  `ROLE_PRESIDENT` transfère $2$ cartes au choix de $H_{president}$ au `ROLE_SCUM`.
 3.  `ROLE_VICE_SCUM` transfère $\max_{power}(H_{vice\_scum}, 1)$ au `ROLE_VICE_PRESIDENT`.
 4.  `ROLE_VICE_PRESIDENT` transfère $1$ carte au choix de $H_{vice\_president}$ au `ROLE_VICE_SCUM`.
@@ -194,7 +194,7 @@ L'identifiant du joueur ouvrant $p_{open}$ est déterminé par :
 
 **5.3.2. Action de Tour (`play_turn`)**
 Pour un `Trick` actif avec une taille $X$ et une puissance courante $P_{current}$ à l'instant $t$, le moteur émet une **Requête d'Action** vers l'agent $p_i$, qui doit retourner un objet `Action` :
-1.  `ACTION_PLAY` : Poser une `Combination` $C$ de taille $X$ telle que $f_{power}(C) > P_{current}$. Si $C$ contient un Joker, l'`Action` doit obligatoirement spécifier `declared_power` (cf. §6.4).
+1.  `ACTION_PLAY` : Poser une `Combination` $C$ de taille $X$ telle que $f_{power}(C) > P_{current}$. Si $C$ contient un Joker, l'`Action` doit obligatoirement spécifier `declared_power` (cf. section 6.4).
 2.  `ACTION_SOFT_PASS` : Ne joue pas, mais `is_eligible = True` pour la suite du `Trick`. Légal uniquement si `pass_type == 'ALLOW_SOFT'`.
 3.  `ACTION_HARD_PASS` : Ne joue pas, et `is_eligible = False` jusqu'au prochain `trick_opening`. Sémantique forcée si `pass_type == 'HARD_ONLY'`.
 
@@ -202,7 +202,7 @@ Pour un `Trick` actif avec une taille $X$ et une puissance courante $P_{current}
 *   Si `pass_type == 'HARD_ONLY'`, tout passe bascule `is_eligible = False` jusqu'au prochain pli.
 *   Si `pass_type == 'ALLOW_SOFT'`, un passe peut maintenir l'éligibilité (`ACTION_SOFT_PASS`), permettant au joueur de resurenchérir si le tour lui revient dans le même `Trick`.
 
-**Broadcast d'Interception** (si `interception_enabled == True`) : voir §6.8, le moteur suspend le flux séquentiel avant de valider $A_{t+1}$ pour interroger les autres joueurs.
+**Broadcast d'Interception** (si `interception_enabled == True`) : voir section 6.8, le moteur suspend le flux séquentiel avant de valider $A_{t+1}$ pour interroger les autres joueurs.
 
 **5.3.3. Clôture du Pli (`trick_closing`)**
 Un `Trick` passe à `is_closed = True` si :
@@ -214,7 +214,7 @@ Le vainqueur du pli (dernier joueur ayant validé `ACTION_PLAY`) ouvre le `Trick
 ### 5.4. Fin de Manche (`round_closing`)
 *   Dès que $|H_i| == 0$, $p_i$ est inséré à la fin de la liste $O$, et son état devient `is_finished = True`.
 *   Si $|O| == N - 1$, le joueur restant $p_{last}$ est inséré à $O[N-1]$. La `Round` se termine et déclenche la distribution des `VictoryPoints`.
-*   *Interaction avec la Pénalité Étendue (`finish_penalty_extended`)* : un joueur qui termine sa main en remplissant l'une des conditions du §6.9 (carte suprême, sortie sur Joker, sortie déclenchant une Révolution) se voit attribuer automatiquement le rôle `ROLE_SCUM` pour la manche suivante $R_{m+1}$, indépendamment de son index de sortie $k$ réel dans $O$.
+*   *Interaction avec la Pénalité Étendue (`finish_penalty_extended`)* : un joueur qui termine sa main en remplissant l'une des conditions du section 6.9 (carte suprême, sortie sur Joker, sortie déclenchant une Révolution) se voit attribuer automatiquement le rôle `ROLE_SCUM` pour la manche suivante $R_{m+1}$, indépendamment de son index de sortie $k$ réel dans $O$.
 
 ## 6. Règles Supplémentaires et Événements de Jeu
 
@@ -222,15 +222,15 @@ Ces événements s'évaluent de manière conditionnelle à différents instants 
 
 ### 6.1. Modificateurs de Pré-Manche (`pre_round_modifiers`)
 Interviennent lors des phases 5.1 et 5.2.
-*   **Attribution stricte du reste (`strict_remainder_allocation`)** : cf. §5.1.1.
+*   **Attribution stricte du reste (`strict_remainder_allocation`)** : cf. section 5.1.1.
 *   **Taxe Aveugle (`blind_tax_enabled`)** : Lors de `exchange_phase`, la fonction de transfert du `ROLE_SCUM` vers le `ROLE_PRESIDENT` est redéfinie. L'opérateur $\max_{power}(H_{scum}, 2)$ est remplacé par une fonction de sélection aléatoire uniforme $rand(H_{scum}, 2)$.
-*   **Le Putsch (`putsch_enabled`)** : cf. §5.1.2. Ce n'est pas un effet automatique mais un **droit** que l'agent `ROLE_SCUM` peut choisir d'invoquer. Conséquence : la `exchange_phase` entière est annulée pour $R_m$.
+*   **Le Putsch (`putsch_enabled`)** : cf. section 5.1.2. Ce n'est pas un effet automatique mais un **droit** que l'agent `ROLE_SCUM` peut choisir d'invoquer. Conséquence : la `exchange_phase` entière est annulée pour $R_m$.
 
 ### 6.2. Clôture Magique Alternative (`magic_card`)
 Généralisation de la règle du 2. Soit $Card_{magic}$ le rang défini par `magic_card_rank` (par défaut 2, mais peut être 10, etc.).
 *   Si `ACTION_PLAY` contient une carte $c$ où $rank(c) == Card_{magic}$, `is_closed` devient **immédiatement** `True`. Le joueur posant la combinaison remporte le `Trick`.
 *   *Interaction avec $X$* : Si `magic_single_clears_all == True`, un joueur peut répondre à un `Trick` de taille $X$ par $C$ où $|C| = 1$ et $rank(c \in C) == Card_{magic}$.
-*   *Interaction avec Révolution* : Si $E_{rev} == True$, $Card_{magic}$ devient dynamiquement le rang possédant la valeur $f_{power}$ symétriquement opposée (ex : si le 2 est magique, en Révolution le 3 devient magique, sauf paramétrage contraire en valeur absolue). Voir [§6.5](#65-révolution-et-double-révolution-revolution_enabled-double_revolution_enabled) pour le déclenchement de la Révolution elle-même, et la résolution [C] de la [matrice de compatibilité (§7)](#7-matrice-de-compatibilité-et-résolution-des-conflits-truth-table) pour la formalisation complète de ce remappage.
+*   *Interaction avec Révolution* : Si $E_{rev} == True$, $Card_{magic}$ devient dynamiquement le rang possédant la valeur $f_{power}$ symétriquement opposée (ex : si le 2 est magique, en Révolution le 3 devient magique, sauf paramétrage contraire en valeur absolue). Voir [section 6.5](#65-révolution-et-double-révolution-revolution_enabled-double_revolution_enabled) pour le déclenchement de la Révolution elle-même, et la résolution [C] de la [matrice de compatibilité (section 7)](#7-matrice-de-compatibilité-et-résolution-des-conflits-truth-table) pour la formalisation complète de ce remappage.
 
 ### 6.3. Forçage par Égalité (`skip_on_equal`)
 *   Si $A_{t+1}$ est `ACTION_PLAY` tel que $f_{power}(C_{t+1}) == P_{current}$, l'état global passe à `is_equal_forced = True`.
@@ -240,7 +240,7 @@ Généralisation de la règle du 2. Soit $Card_{magic}$ le rang défini par `mag
 
 ### 6.4. Substitution Joker (`use_jokers`)
 *   Les Jokers agissent comme `Wildcard`. Dans une `Combination` $C$ ($X \ge 2$), un Joker $j$ prend la valeur $f_{power}$ de $c_{std} \in C$, précisée par le champ `declared_power` de l'`Action`.
-* Restriction : Un Joker $j \in C$ invalide mathématiquement la possibilité pour $C$ de déclencher la règle [§6.5](#65-révolution-et-double-révolution-revolution_enabled-double_revolution_enabled) (`revolution_enabled`), voir résolution [A] de la [matrice de compatibilité (§7)](#7-matrice-de-compatibilité-et-résolution-des-conflits-truth-table).
+* Restriction : Un Joker $j \in C$ invalide mathématiquement la possibilité pour $C$ de déclencher la règle [section 6.5](#65-révolution-et-double-révolution-revolution_enabled-double_revolution_enabled) (`revolution_enabled`), voir résolution [A] de la [matrice de compatibilité (section 7)](#7-matrice-de-compatibilité-et-résolution-des-conflits-truth-table).
 
 ### 6.5. Révolution et Double Révolution (`revolution_enabled`, `double_revolution_enabled`)
 Soit la variable d'état de verrouillage $L_{rev} \in \{True, False\}$, réinitialisée à `False` au début de chaque `Round`.
@@ -271,7 +271,7 @@ Le joueur $p_i$ subit la pénalité de sortie (définie par `finish_penalty_type
 2.  **Sortie Joker (`no_finish_on_joker`)** : $\exists j \in C_{final}$ tel que $rank(j) == Joker$.
 3.  **Sortie sur Révolution (`no_finish_on_revolution`)** : $C_{final}$ remplit les conditions de la règle 6.5, déclenchant $E_{rev} = \neg E_{rev}$ à l'instant exact de la sortie.
 
-Effet additionnel : si `finish_penalty_extended == True`, le joueur concerné se voit également assigné `ROLE_SCUM` pour $R_{m+1}$ (cf. §5.4).
+Effet additionnel : si `finish_penalty_extended == True`, le joueur concerné se voit également assigné `ROLE_SCUM` pour $R_{m+1}$ (cf. section 5.4).
 
 ## 7. Matrice de Compatibilité et Résolution des Conflits (Truth Table)
 
