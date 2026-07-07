@@ -19,7 +19,7 @@ import argparse
 import os
 import shutil
 import time
-from typing import Any, Dict, List, Optional, Type, cast
+from typing import Any, Callable, Dict, List, Optional, cast
 
 import polars as pl
 import ray
@@ -45,7 +45,7 @@ from registry.agent_registry import (
 
 # Registre des profils heuristiques automatisés (exclut `human_agent`), conservé sous ce nom pour compatibilité
 # avec les autres modules du projet qui l'importent directement (`research.run_pipeline`, `research.evaluate_agent`).
-_AGENT_REGISTRY: Dict[str, Type[Any]] = AUTOMATED_AGENT_REGISTRY
+_AGENT_REGISTRY: Dict[str, Callable[[int, GameConfig], AbstractBaseAgent]] = AUTOMATED_AGENT_REGISTRY
 
 # Profils entraînables dont la construction nécessite le chargement d'un fichier de poids (`agents.rl_agent.RLAgent` ou
 # `agents.torch_rl_agent.TorchRLAgent`). Le nom de chaque profil correspond exactement au nom du module Python dans lequel la classe d'agent est 

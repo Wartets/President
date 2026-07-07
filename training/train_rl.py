@@ -13,7 +13,7 @@ Le module dépend de `agents.rl_agent`, `agents.greedy_bot`, `agents.rule_based_
 from __future__ import annotations
 
 import argparse
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from rich.console import Console
@@ -67,7 +67,7 @@ class _ReturnBaseline:
         return self.value
 
 
-def _opponent_classes(opponent_pool: str, player_count: int) -> List[Type[AbstractBaseAgent]]:
+def _opponent_classes(opponent_pool: str, player_count: int) -> List[Callable[[int, GameConfig], AbstractBaseAgent]]:
     """
     Résout les classes d'adversaires appliquées aux sièges autres que celui de l'agent entraîné.
 
