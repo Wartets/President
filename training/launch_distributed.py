@@ -34,6 +34,7 @@ def launch(
     total_steps: int,
     resume_weights: Optional[str] = None,
     model_name: str = "torch_rl_weights",
+    config_overrides: Optional[dict] = None,
 ) -> None:
     """
     Démarre les Rollout Workers et le Trainer, puis attend l'achèvement de l'entraînement.
@@ -45,6 +46,10 @@ def launch(
     Paramètre `redis_host`, `redis_port` : coordonnées de l'instance Redis partagée entre workers et Trainer.
     Paramètre `batch_size` : taille de lot utilisée par le Trainer à chaque étape de gradient.
     Paramètre `total_steps` : nombre total d'étapes d'apprentissage exécutées par le Trainer.
+    Paramètre `config_overrides` : champs supplémentaires de `GameConfig` appliqués à la configuration de règles simulée par les Rollout
+    Workers pour cet appel, `None` pour la configuration par défaut. Permet d'appeler `launch` successivement avec des jeux de règles
+    différents (curriculum d'entraînement) sur des tranches de `total_steps` cumulatives, chaque tranche reprenant les poids de la
+    précédente via `resume_weights`.
     Retourne `None`. Effet de bord : initialise un cluster Ray local, démarre le Trainer dans un thread dédié, boucle indéfiniment sur les
     acteurs de rollout jusqu'à l'achèvement du Trainer, puis arrête le cluster Ray.
     """
@@ -57,7 +62,7 @@ def launch(
         )
 
     ray.init(num_cpus=num_workers, ignore_reinit_error=True, log_to_driver=False)
-    config = GameConfig(player_count=player_count)
+    config = GameConfig(player_count=player_count, **(config_overrides or {}))
 
     trainer = Trainer(
         redis_host=redis_host,

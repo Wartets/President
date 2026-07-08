@@ -3,27 +3,35 @@ Module du pipeline automatique complet de recherche.
 
 Le module orchestre, sans intervention humaine, une campagne de recherche incrémentale et adaptative couvrant l'intégralité de l'espace des
 paramètres de `core.config.GameConfig` : entraînement continu (jamais recommencé de zéro tant que des poids existent déjà) de l'agent
-linéaire et de l'agent neuronal distribué, balayage étendu d'hyperparamètres (taux d'apprentissage croisé avec le pool d'adversaires) avec
-sélection automatique de la meilleure combinaison observée par nombre de joueurs, simulations de référence pour l'intégralité des profils
-heuristiques disponibles (à l'exception du profil de simulation par rollouts, jugé trop coûteux pour une campagne à grande échelle) croisés
-avec l'intégralité des nombres de joueurs et une grille étendue de configurations de règles (chaque paramètre booléen basculé
-individuellement, chaque valeur énumérée testée, plus un ensemble de combinaisons tirées aléatoirement pour capturer les interactions entre
-règles), recherche combinatoire multi-configurations sur ce même produit cartésien, tournoi direct entre la politique linéaire et la
-politique neuronale entraînées pour un même nombre de joueurs avec désignation d'un champion courant, vérification statistique automatisée
-d'un ensemble de propriétés générales attendues du moteur de règles sur une partie fraîche et jetable, évaluations comparatives du modèle
-linéaire contre les profils heuristiques, génération versionnée des graphiques, puis rédaction d'un rapport de synthèse relisant
-l'intégralité des données accumulées sur tous les lancements précédents.
+linéaire et de l'agent neuronal distribué sous curriculum de règles varié, balayage étendu d'hyperparamètres (taux d'apprentissage croisé
+avec le pool d'adversaires) avec sélection automatique de la meilleure combinaison observée par nombre de joueurs, simulations de référence
+pour l'intégralité des profils heuristiques disponibles (à l'exception du profil de simulation par rollouts, jugé trop coûteux pour une
+campagne à grande échelle) croisés avec l'intégralité des nombres de joueurs et une grille très étendue de configurations de règles (chaque
+paramètre booléen basculé individuellement, chaque valeur énumérée testée, chaque paire de règles avancées croisée pour capturer les
+interactions à deux facteurs, plusieurs rangs magiques/de saut de tour/nombres de paquets forcés/joueurs ouvreurs/tailles de pénalité de
+sortie, plus un large ensemble de combinaisons tirées aléatoirement), recherche combinatoire multi-configurations sur ce même produit
+cartésien, tournoi direct entre la politique linéaire et la politique neuronale entraînées pour un même nombre de joueurs avec désignation
+d'un champion courant, vérification statistique automatisée d'un ensemble de propriétés générales attendues du moteur de règles sur une
+partie fraîche et jetable, évaluations comparatives du modèle linéaire contre les profils heuristiques, génération versionnée des
+graphiques, puis rédaction d'un rapport de synthèse relisant l'intégralité des données accumulées sur tous les lancements précédents.
 
 Contrairement à une exécution "tout ou rien", chaque lancement du pipeline ajoute du travail neuf (nouvelles parties, nouvelles manches
 d'entraînement, nouvelles combinaisons de balayage, nouvelles itérations combinatoires, nouveaux tournois) par-dessus ce qui a déjà été
 calculé lors des lancements précédents, sans jamais recalculer ni écraser une donnée déjà acquise : le fichier
-`data/pipeline_manifest.json` conserve la couverture cumulée et sert de source de vérité entre deux lancements. Une interruption brutale
-(Ctrl+C, SIGTERM) est prise en compte entre deux unités de travail : le manifeste est sauvegardé avant de quitter, et le prochain lancement
-reprend exactement là où le précédent s'est arrêté plutôt que de recommencer les combinaisons déjà couvertes. Étant donné l'ampleur de la
-grille de configurations couverte par défaut (produit cartésien de tous les profils heuristiques, tous les nombres de joueurs et une
-plusieurs dizaines de variantes de règles), un unique lancement ne couvre généralement qu'une fraction de la grille complète ; la
-priorisation par couverture cumulée croissante garantit que chaque combinaison finit par recevoir une couverture comparable au fil des
-lancements successifs, sans intervention manuelle.
+`data/pipeline_manifest.json` conserve la couverture cumulée et sert de source de vérité entre deux lancements. Le manifeste est désormais
+sauvegardé après chaque combinaison individuelle traitée (et non plus seulement après un bloc entier de combinaisons), et toute exception
+levée par une combinaison isolée (échec Ray transitoire, configuration structurellement invalide) est capturée et journalisée sans
+interrompre les combinaisons suivantes, de sorte qu'une interruption brutale (Ctrl+C, SIGTERM, arrêt du processus par le système
+d'exploitation) ne fait jamais perdre plus qu'une combinaison en cours au moment de l'interruption. Étant donné l'ampleur de la grille de
+configurations couverte par défaut, un unique lancement ne couvre généralement qu'une fraction de la grille complète ; la priorisation par
+couverture cumulée croissante garantit que chaque combinaison finit par recevoir une couverture comparable au fil des lancements successifs,
+sans intervention manuelle.
+
+L'entraînement des agents (linéaire et neuronal) ne rallonge jamais sa durée totale d'un lancement à l'autre au-delà de l'incrément demandé
+explicitement (`--training-rounds-increment`, `--distributed-steps-increment`) : ce volume est distribué sur plusieurs blocs consécutifs de
+curriculum, chacun utilisant une configuration de règles et, pour l'agent linéaire, un pool d'adversaires tirés aléatoirement dans la grille
+étendue, plutôt qu'une unique configuration figée sur toute la durée de l'incrément. Ce choix vise à produire des agents dont la politique
+généralise à la diversité des règles activables plutôt qu'à un unique jeu de règles par défaut.
 
 Seules les étapes ne gérant pas déjà leur propre affichage de progression (entraînement linéaire, balayage d'hyperparamètres, sélection des
 meilleurs hyperparamètres) s'exécutent sous le tableau de bord partagé `ProgressManager` ; les étapes qui embarquent leur propre système de
@@ -31,7 +39,7 @@ rendu (`tqdm` et `analytics.live_monitor.LiveMonitor` dans `research.run_simulat
 tableaux `rich` périodiques dans `training.trainer.Trainer`) s'exécutent en dehors de ce tableau de bord, deux instances `rich.live.Live`
 actives simultanément sur la même console produisant un affichage corrompu.
 
-Le module dépend de `core.config`, `naming`, `console_theme`, `progress_manager`, `checkpoint_utils`, `agents.greedy_bot`,
+Le module dépend de `core.config`, `naming`, `project_paths`, `console_theme`, `progress_manager`, `checkpoint_utils`, `agents.greedy_bot`,
 `analytics.event_logger`, `analytics.metrics_calc`, `engine.event_bus`, `engine.game_runner`, `events.structural`, `training.train_rl`,
 `training.trainer`, `training.launch_distributed`, `research.run_simulation`, `research.run_combinatory`, `research.evaluate_agent` et
 `research.generate_graphs`.
@@ -46,7 +54,7 @@ import random
 import sys
 import time
 import traceback
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from rich.console import Console
@@ -56,6 +64,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 import console_theme
 import naming
+import project_paths
 from agents.greedy_bot import GreedyBot
 from agents.interface import AbstractBaseAgent
 from analytics.event_logger import EventLogger
@@ -71,7 +80,7 @@ from engine.game_runner import Game
 from events.structural import EventRoundStart
 from progress_manager import ProgressManager
 
-_MANIFEST_PATH = os.path.join("data", "pipeline_manifest.json")
+_MANIFEST_PATH = os.path.join(project_paths.DATA_DIR, "pipeline_manifest.json")
 _console = Console()
 
 # Profils automatisés volontairement exclus de la recherche automatisée à grande échelle : le coût par décision de la simulation Monte-Carlo
@@ -83,7 +92,12 @@ _PROGRESS_CHUNK_SIZE = 5
 
 # Nombre de combinaisons aléatoires supplémentaires générées par `_build_extended_rule_presets` afin de capturer les interactions entre règles
 # avancées qu'un balayage uniquement paramètre-par-paramètre ne peut pas révéler.
-_RANDOM_GRID_COMBOS = 24
+_RANDOM_GRID_COMBOS = 60
+
+# Nombre de blocs consécutifs sur lesquels un incrément d'entraînement (linéaire ou distribué) est réparti, chaque bloc utilisant une
+# configuration de règles (et, pour l'agent linéaire, un pool d'adversaires) tirée aléatoirement dans la grille étendue de présets, afin de
+# constituer un curriculum d'entraînement plutôt qu'un unique jeu de règles figé sur toute la durée de l'incrément.
+_CURRICULUM_BLOCKS = 8
 
 # Décroissance d'exploration utilisée par `training.train_rl.train`, répliquée ici pour estimer un epsilon de reprise cohérent avec le
 # nombre de manches déjà entraînées sur un modèle repris plutôt que recréé.
@@ -122,7 +136,7 @@ def _load_manifest() -> Dict[str, Any]:
     Retourne un dictionnaire de manifeste. Aucun effet de bord.
     """
     default = {
-        "schema_version": 4,
+        "schema_version": 5,
         "runs": [],
         "models": {},
         "baseline_coverage": {},
@@ -133,6 +147,7 @@ def _load_manifest() -> Dict[str, Any]:
         "tournament_results": {},
         "validation_results": {},
         "graph_versions": {"next": 1},
+        "failed_units": [],
     }
     loaded = load_json(_MANIFEST_PATH, default=None)
     if loaded is None:
@@ -150,7 +165,29 @@ def _save_manifest(manifest: Dict[str, Any]) -> None:
     Retourne `None`. Effet de bord : écrit `data/pipeline_manifest.json` par une opération atomique, ne laissant jamais le fichier dans
     un état partiellement écrit même en cas d'interruption brutale pendant l'écriture.
     """
+    project_paths.ensure_all()
     atomic_write_json(_MANIFEST_PATH, manifest)
+
+
+def _record_failed_unit(manifest: Dict[str, Any], unit_kind: str, unit_key: str, error: BaseException) -> None:
+    """
+    Journalise dans le manifeste l'échec isolé d'une unité de travail individuelle (une combinaison, un bloc de curriculum).
+
+    Paramètre `manifest` : manifeste cumulatif, muté en place.
+    Paramètre `unit_kind` : catégorie de l'unité ayant échoué (`"baseline"`, `"evaluation"`, `"training_block"`, ...).
+    Paramètre `unit_key` : identifiant de l'unité concernée.
+    Paramètre `error` : exception capturée.
+    Retourne `None`. Effet de bord : ajoute une entrée bornée (200 dernières) à `manifest["failed_units"]`, permettant d'inspecter après
+    coup les unités ayant échoué sans jamais interrompre le reste de la campagne pour autant.
+    """
+    entries = manifest.setdefault("failed_units", [])
+    entries.append({
+        "kind": unit_kind,
+        "key": unit_key,
+        "error": repr(error),
+        "timestamp": time.time(),
+    })
+    manifest["failed_units"] = entries[-200:]
 
 
 def _model_key(model_name: str, player_count: int) -> str:
@@ -184,15 +221,18 @@ def _heuristic_profiles() -> List[str]:
 
 def _build_extended_rule_presets() -> Dict[str, Dict[str, Any]]:
     """
-    Construit une grille étendue de présets de règles couvrant l'intégralité de l'espace des paramètres de `GameConfig`.
+    Construit une grille étendue de présets de règles couvrant l'intégralité de l'espace des paramètres de `GameConfig`, y compris les
+    interactions à deux facteurs entre les règles avancées les plus structurantes.
 
     Retourne un dictionnaire nommé de dictionnaires de surcharge de `GameConfig`, couvrant : chaque champ booléen basculé
     individuellement dans les deux sens, chaque mode de distribution de VP, chaque sémantique de passe, plusieurs rangs magiques et de
-    saut de tour, les deux types de pénalité de sortie, chaque rôle ciblé par l'attribution stricte du reste, une configuration
-    "tout activé" et une configuration "tout désactivé", ainsi qu'un ensemble de combinaisons aléatoires reproductibles couvrant les
-    interactions entre paramètres. Les combinaisons structurellement invalides (ex : interception sans second paquet) ne sont pas
-    filtrées ici ; elles sont ignorées avec un avertissement par `research.run_combinatory.run_grid` au moment de leur utilisation.
-    Aucun effet de bord.
+    saut de tour, plusieurs nombres de paquets forcés, plusieurs identifiants de joueur ouvreur, les deux types de pénalité de sortie avec
+    plusieurs tailles de reprise de cartes, chaque rôle ciblé par l'attribution stricte du reste, une configuration "tout activé" et une
+    configuration "tout désactivé", l'ensemble des paires de règles avancées structurantes activées simultanément (capturant les
+    interactions à deux facteurs qu'un balayage strictement paramètre-par-paramètre ne peut pas révéler), ainsi qu'un large ensemble de
+    combinaisons aléatoires reproductibles. Les combinaisons structurellement invalides (ex : interception sans second paquet) ne sont pas
+    filtrées ici ; elles sont ignorées avec un avertissement au moment de leur utilisation par les appelants concernés. Aucun effet de
+    bord.
     """
     from core.config import (
         PASS_TYPE_ALLOW_SOFT, PASS_TYPE_HARD_ONLY, PENALTY_DRAW_CARDS,
@@ -220,15 +260,22 @@ def _build_extended_rule_presets() -> Dict[str, Dict[str, Any]]:
     for pass_mode in (PASS_TYPE_HARD_ONLY, PASS_TYPE_ALLOW_SOFT):
         presets[f"pass_{pass_mode.lower()}"] = {"pass_type": pass_mode}
 
-    for rank in ("5", "8", "10", "K"):
+    for rank in ("4", "5", "7", "8", "10", "J", "K"):
         presets[f"magic_rank_{rank}"] = {"magic_card_enabled": True, "magic_card_rank": rank, "magic_two": False}
 
-    for rank in ("4", "7", "8", "J"):
+    for rank in ("3", "4", "7", "8", "9", "J", "A"):
         presets[f"skip_turn_rank_{rank}"] = {"skip_turn_enabled": True, "skip_turn_rank": rank}
 
-    presets["finish_penalty_draw"] = {
-        "finish_penalty_enabled": True, "finish_penalty_type": PENALTY_DRAW_CARDS, "finish_penalty_draw_count": 2,
-    }
+    for deck_count in (2, 3, 4, 5):
+        presets[f"forced_decks_{deck_count}"] = {"deck_scaling_auto": False, "forced_deck_count": deck_count}
+
+    for opener in (0, 1, 2, 3):
+        presets[f"first_opener_{opener}"] = {"first_trick_opener_id": opener}
+
+    for draw_count in (1, 2, 3, 4):
+        presets[f"finish_penalty_draw_{draw_count}"] = {
+            "finish_penalty_enabled": True, "finish_penalty_type": PENALTY_DRAW_CARDS, "finish_penalty_draw_count": draw_count,
+        }
     presets["finish_penalty_instant_full"] = {
         "finish_penalty_enabled": True, "finish_penalty_type": PENALTY_INSTANT_SCUM,
         "finish_penalty_extended": True, "no_finish_on_joker": True, "no_finish_on_revolution": True,
@@ -242,7 +289,18 @@ def _build_extended_rule_presets() -> Dict[str, Dict[str, Any]]:
         field: False for field in boolean_fields if field not in ("use_jokers", "magic_two")
     }
 
-    rng = random.Random("pipeline_random_grid_v1")
+    # Interactions à deux facteurs entre les règles avancées les plus structurantes, chacune activée simultanément avec une autre. Cette
+    # famille de présets complète les bascules individuelles ci-dessus, qui ne peuvent révéler que l'effet marginal isolé d'un paramètre,
+    # jamais l'effet d'une combinaison spécifique.
+    interaction_fields = [
+        "straights_enabled", "interception_enabled", "double_revolution_enabled",
+        "putsch_enabled", "skip_turn_enabled", "finish_penalty_extended",
+        "blind_tax_enabled", "strict_remainder_allocation", "skip_on_equal",
+    ]
+    for field_a, field_b in itertools.combinations(interaction_fields, 2):
+        presets[f"pair_{field_a}_and_{field_b}"] = {field_a: True, field_b: True}
+
+    rng = random.Random("pipeline_random_grid_v2")
     for combo_index in range(_RANDOM_GRID_COMBOS):
         overrides: Dict[str, Any] = {}
         for field in boolean_fields:
@@ -252,6 +310,18 @@ def _build_extended_rule_presets() -> Dict[str, Dict[str, Any]]:
             [VP_DISTRIBUTION_LEGACY_STEPPED, VP_DISTRIBUTION_LINEAR, VP_DISTRIBUTION_SYMMETRICAL]
         )
         overrides["pass_type"] = rng.choice([PASS_TYPE_HARD_ONLY, PASS_TYPE_ALLOW_SOFT])
+        if rng.random() < 0.3:
+            overrides["magic_card_enabled"] = True
+            overrides["magic_card_rank"] = rng.choice(["4", "5", "7", "8", "10", "J", "K"])
+            overrides["magic_two"] = False
+        if rng.random() < 0.3:
+            overrides["skip_turn_enabled"] = True
+            overrides["skip_turn_rank"] = rng.choice(["3", "4", "7", "8", "9", "J", "A"])
+        if rng.random() < 0.25:
+            overrides["deck_scaling_auto"] = False
+            overrides["forced_deck_count"] = rng.choice([2, 3, 4, 5])
+        if rng.random() < 0.2:
+            overrides["finish_penalty_draw_count"] = rng.choice([1, 2, 3, 4])
         presets[f"random_combo_{combo_index}"] = overrides
 
     return presets
@@ -265,7 +335,8 @@ def _resolve_rule_presets(requested: str) -> List[str]:
     historiques (`base`, `straights`, `full`), soit une liste explicite de noms séparés par des virgules.
     Retourne la liste résolue de noms de présets. Effet de bord : étend `research.run_simulation._RULE_PRESETS` en place avec
     l'intégralité de la grille construite par `_build_extended_rule_presets`, quelle que soit la valeur de `requested`, afin que tout nom
-    de préset étendu référencé explicitement par l'appelant reste résolvable.
+    de préset étendu référencé explicitement par l'appelant reste résolvable, et afin que le curriculum d'entraînement dispose lui aussi
+    de l'intégralité de la grille étendue.
     """
     from research.run_simulation import _RULE_PRESETS as existing_presets
 
@@ -297,6 +368,23 @@ def _prioritize_baseline_combos(
     return sorted(combos, key=_coverage)
 
 
+def _curriculum_blocks(total: int, n_blocks: int) -> List[int]:
+    """
+    Répartit un volume total de travail sur un nombre borné de blocs consécutifs.
+
+    Paramètre `total` : volume total à répartir (manches ou étapes de gradient), entier positif.
+    Paramètre `n_blocks` : nombre de blocs souhaité, plafonné par `total` lui-même.
+    Retourne une liste d'entiers strictement positifs sommant exactement à `total`, de taille au plus `n_blocks`. Aucun effet de bord.
+    """
+    if total <= 0:
+        return []
+    blocks = min(n_blocks, total)
+    base = total // blocks
+    remainder = total - base * blocks
+    sizes = [base + (1 if i < remainder else 0) for i in range(blocks)]
+    return [size for size in sizes if size > 0]
+
+
 def _train_linear_agent_incremental(
     manifest: Dict[str, Any],
     player_count: int,
@@ -306,19 +394,27 @@ def _train_linear_agent_incremental(
     progress: ProgressManager,
 ) -> Dict[str, Any]:
     """
-    Continue l'entraînement du modèle linéaire existant pour `player_count`, ou en démarre un nouveau si aucun n'existe encore.
+    Continue l'entraînement du modèle linéaire existant pour `player_count` sous curriculum de règles varié, ou en démarre un nouveau si
+    aucun n'existe encore.
 
     Paramètre `manifest` : manifeste cumulatif, mis à jour en place avec les nouvelles métadonnées du modèle.
     Paramètre `player_count` : nombre de joueurs de la configuration d'entraînement.
-    Paramètre `rounds_increment` : nombre de manches supplémentaires à entraîner lors de cet appel.
+    Paramètre `rounds_increment` : nombre total de manches supplémentaires à entraîner lors de cet appel, identique quel que soit le
+    nombre de blocs de curriculum parcourus (la durée totale de l'entraînement n'est jamais rallongée par le curriculum, seule sa
+    composition varie).
     Paramètre `seed` : graine de reproductibilité de la session d'entraînement.
-    Paramètre `killer` : indicateur d'arrêt propre, transmis à la boucle d'entraînement pour permettre un arrêt entre deux manches.
+    Paramètre `killer` : indicateur d'arrêt propre, transmis à la boucle d'entraînement pour permettre un arrêt entre deux blocs.
     Paramètre `progress` : gestionnaire de barres de progression partagé.
     Retourne un dictionnaire décrivant l'état du modèle après cette session (chemin des poids, manches totales entraînées cumulées,
-    VP moyen récent, hyperparamètres utilisés). Effet de bord : écrit un nouveau fichier de poids et une entrée d'historique étendue,
-    jamais un fichier de poids déjà existant. Si le balayage d'hyperparamètres a déjà désigné une meilleure combinaison
-    (taux d'apprentissage, pool d'adversaires) pour ce nombre de joueurs, celle-ci est utilisée à la place des valeurs par défaut.
+    VP moyen récent, journal du curriculum de règles/adversaires utilisé bloc par bloc). Effet de bord : écrit un nouveau fichier de
+    poids et une entrée d'historique étendue, jamais un fichier de poids déjà existant. `rounds_increment` est réparti sur
+    `min(_CURRICULUM_BLOCKS, rounds_increment)` blocs consécutifs, chacun utilisant une configuration de règles et un pool d'adversaires
+    tirés aléatoirement dans la grille étendue de présets (sauf si un meilleur pool d'adversaires a déjà été désigné par le balayage
+    d'hyperparamètres pour ce nombre de joueurs, auquel cas ce pool est conservé fixe pour tous les blocs). Tout bloc dont la
+    configuration de règles s'avère structurellement invalide (contrainte de `GameConfig.__post_init__`) retombe silencieusement sur la
+    configuration de base plutôt que d'interrompre l'entraînement.
     """
+    from research.run_simulation import _RULE_PRESETS
     from training.train_rl import train
 
     key = _model_key("pipeline_rl_weights", player_count)
@@ -326,50 +422,93 @@ def _train_linear_agent_incremental(
 
     best_hyperparams = manifest.get("best_hyperparameters", {}).get(str(player_count), {})
     learning_rate = float(best_hyperparams.get("learning_rate", 0.01))
-    opponent_pool = str(best_hyperparams.get("opponent_pool", "mixed"))
+    fixed_opponent_pool = best_hyperparams.get("opponent_pool")
 
     initial_weights: Optional[np.ndarray] = None
     rounds_already = 0
     history_path: Optional[str] = None
+    curriculum_log: List[Dict[str, Any]] = list(existing.get("curriculum_log", [])) if existing else []
     if existing and os.path.exists(existing.get("latest_weights_path", "")):
         initial_weights = np.load(existing["latest_weights_path"])
         rounds_already = int(existing.get("rounds_trained_total", 0))
         history_path = existing.get("history_path")
         progress.log(
-            f"[cyan]Modèle linéaire p{player_count}[/cyan] : reprise à {rounds_already} manches déjà entraînées "
-            f"(lr={learning_rate:g}, pool={opponent_pool})."
+            f"[cyan]Modèle linéaire p{player_count}[/cyan] : reprise à {rounds_already} manches déjà entraînées, "
+            f"curriculum de règles varié (lr={learning_rate:g})."
         )
     else:
         progress.log(
-            f"[cyan]Modèle linéaire p{player_count}[/cyan] : aucun poids existant, création d'un nouveau modèle "
-            f"(lr={learning_rate:g}, pool={opponent_pool})."
+            f"[cyan]Modèle linéaire p{player_count}[/cyan] : aucun poids existant, création d'un nouveau modèle, "
+            f"curriculum de règles varié (lr={learning_rate:g})."
         )
 
-    initial_epsilon = max(_EPSILON_MIN, _EPSILON_START * (_EPSILON_DECAY ** rounds_already))
-    config = GameConfig(random_seed=seed, player_count=player_count)
+    block_sizes = _curriculum_blocks(rounds_increment, _CURRICULUM_BLOCKS)
+    curriculum_rng = random.Random(f"pipeline_curriculum:{player_count}:{seed}:{rounds_already}")
+    preset_names = ["base"] + [name for name in _RULE_PRESETS.keys()]
+    opponent_pools_available = ["greedy", "rule_based", "mixed"]
 
-    task_id = progress.add_task(f"Entraînement linéaire p{player_count}", total=rounds_increment, min_step_interval=5)
-    trainee, running_vp = train(
-        config,
-        rounds_increment,
-        learning_rate=learning_rate,
-        opponent_pool=opponent_pool,
-        initial_weights=initial_weights,
-        initial_epsilon=initial_epsilon,
-        stop_check=lambda: killer.should_stop,
-        on_round=lambda index: progress.advance(task_id, 1),
-        use_internal_progress=False,
-        on_log=progress.log,
-    )
-    progress.complete_task(task_id, description=f"Entraînement linéaire p{player_count} — terminé")
+    trainee_weights = initial_weights
+    running_vp_total: List[float] = []
+    rounds_executed_total = 0
 
-    rounds_executed = len(running_vp)
-    total_rounds = rounds_already + rounds_executed
+    for block_index, block_rounds in enumerate(block_sizes):
+        if killer.should_stop:
+            break
+
+        preset_name = curriculum_rng.choice(preset_names)
+        overrides = dict(_RULE_PRESETS.get(preset_name, {})) if preset_name != "base" else {}
+        opponent_pool = fixed_opponent_pool or curriculum_rng.choice(opponent_pools_available)
+        block_seed = seed + rounds_already + rounds_executed_total
+
+        try:
+            config = GameConfig(random_seed=block_seed, player_count=player_count, **overrides)
+        except ValueError as error:
+            progress.log(
+                f"[yellow]Bloc de curriculum '{preset_name}' invalide pour p{player_count} ({error}), "
+                "repli sur la configuration de base pour ce bloc.[/yellow]"
+            )
+            _record_failed_unit(manifest, "training_block", f"{key}:{preset_name}", error)
+            preset_name = "base"
+            overrides = {}
+            config = GameConfig(random_seed=block_seed, player_count=player_count)
+
+        initial_epsilon = max(_EPSILON_MIN, _EPSILON_START * (_EPSILON_DECAY ** (rounds_already + rounds_executed_total)))
+        task_id = progress.add_task(
+            f"Entraînement linéaire p{player_count} — bloc {block_index + 1}/{len(block_sizes)} "
+            f"({preset_name}, {opponent_pool})",
+            total=block_rounds, min_step_interval=5,
+        )
+        trainee, block_vp = train(
+            config,
+            block_rounds,
+            learning_rate=learning_rate,
+            opponent_pool=opponent_pool,
+            initial_weights=trainee_weights,
+            initial_epsilon=initial_epsilon,
+            stop_check=lambda: killer.should_stop,
+            on_round=lambda index: progress.advance(task_id, 1),
+            use_internal_progress=False,
+            on_log=progress.log,
+        )
+        progress.complete_task(task_id, description=f"Bloc {block_index + 1}/{len(block_sizes)} ({preset_name}) — terminé")
+
+        trainee_weights = trainee.weights
+        running_vp_total.extend(block_vp)
+        rounds_executed_total += len(block_vp)
+        curriculum_log.append({
+            "rule_preset": preset_name,
+            "opponent_pool": opponent_pool,
+            "rounds": len(block_vp),
+            "seed": block_seed,
+        })
+
+    total_rounds = rounds_already + rounds_executed_total
+    final_weights = trainee_weights if trainee_weights is not None else np.zeros(5, dtype=np.float64)
 
     output_path = naming.build_weights_filename(
         model_name="pipeline_rl_weights", player_count=player_count, learning_rate=learning_rate, rounds=total_rounds,
     )
-    np.save(output_path, trainee.weights)
+    np.save(output_path, final_weights)
     naming.write_weights_metadata(
         output_path,
         {
@@ -377,8 +516,9 @@ def _train_linear_agent_incremental(
             "player_count": player_count,
             "learning_rate": learning_rate,
             "rounds_trained": total_rounds,
-            "opponent_pool": opponent_pool,
+            "opponent_pool": fixed_opponent_pool or "curriculum_varied",
             "seed": seed,
+            "curriculum_blocks_this_run": len(block_sizes),
         },
     )
 
@@ -388,11 +528,11 @@ def _train_linear_agent_incremental(
             handle.write("round_index,vp\n")
 
     with open(history_path, "a", encoding="utf-8") as handle:
-        for offset, vp in enumerate(running_vp):
+        for offset, vp in enumerate(running_vp_total):
             handle.write(f"{rounds_already + offset},{vp}\n")
 
-    tail = running_vp[-max(1, len(running_vp) // 20):] if running_vp else []
-    head_window = running_vp[: max(1, len(running_vp) // 20)] if running_vp else []
+    tail = running_vp_total[-max(1, len(running_vp_total) // 20):] if running_vp_total else []
+    head_window = running_vp_total[: max(1, len(running_vp_total) // 20)] if running_vp_total else []
     convergence_gap: Optional[float] = None
     if tail and head_window:
         convergence_gap = float(sum(tail) / len(tail) - sum(head_window) / len(head_window))
@@ -401,11 +541,12 @@ def _train_linear_agent_incremental(
         "latest_weights_path": output_path,
         "rounds_trained_total": total_rounds,
         "history_path": history_path,
-        "final_vp_mean": float(sum(tail) / len(tail)) if tail else existing.get("final_vp_mean", 0.0) if existing else 0.0,
-        "rounds_executed_this_run": rounds_executed,
+        "final_vp_mean": float(sum(tail) / len(tail)) if tail else (existing.get("final_vp_mean", 0.0) if existing else 0.0),
+        "rounds_executed_this_run": rounds_executed_total,
         "learning_rate_used": learning_rate,
-        "opponent_pool_used": opponent_pool,
+        "opponent_pool_used": fixed_opponent_pool or "curriculum_varied",
         "convergence_gap_this_run": convergence_gap,
+        "curriculum_log": curriculum_log[-300:],
     }
     manifest["models"][key] = result
     return result
@@ -436,7 +577,8 @@ def _sweep_hyperparameters_incremental(
     Paramètre `killer` : indicateur d'arrêt propre, consulté entre deux combinaisons.
     Paramètre `progress` : gestionnaire de barres de progression partagé.
     Retourne un dictionnaire portant le chemin du fichier CSV cumulatif et le nombre de nouvelles combinaisons ajoutées lors de cet appel.
-    Effet de bord : ajoute des lignes au fichier CSV existant sans jamais supprimer ni recalculer les lignes déjà présentes.
+    Effet de bord : ajoute des lignes au fichier CSV existant sans jamais supprimer ni recalculer les lignes déjà présentes ; sauvegarde
+    le manifeste après chaque combinaison individuellement traitée plutôt qu'en fin de balayage complet.
     """
     import polars as pl
 
@@ -444,8 +586,8 @@ def _sweep_hyperparameters_incremental(
 
     coverage = manifest["lr_sweep_coverage"]
     combos_done = set(coverage.get("combos_done", []))
-    output_csv = coverage.get("output_csv") or os.path.join("data", "learning_rate_sweep.csv")
-    naming.ensure_dir("data")
+    output_csv = coverage.get("output_csv") or os.path.join(project_paths.DATA_DIR, "learning_rate_sweep.csv")
+    project_paths.ensure_all()
 
     all_combos: List[Tuple[int, float, str, int]] = [
         (pc, lr, pool, seed_offset)
@@ -461,28 +603,47 @@ def _sweep_hyperparameters_incremental(
         return {"output_csv": output_csv, "new_combos": 0}
 
     task_id = progress.add_task("Balayage d'hyperparamètres", total=len(pending_combos))
-    new_rows: List[Dict[str, Any]] = []
     added = 0
     for player_count, learning_rate, opponent_pool, seed_offset in pending_combos:
         if killer.should_stop:
             progress.log("[yellow]Arrêt demandé, balayage interrompu proprement.[/yellow]")
             break
-        config = GameConfig(random_seed=seed + seed_offset, player_count=player_count)
-        _trainee, running_vp = train(
-            config, rounds_per_run, learning_rate=learning_rate, opponent_pool=opponent_pool,
-            use_internal_progress=False,
-        )
-        tail = running_vp[-max(1, len(running_vp) // 20):] if running_vp else []
-        new_rows.append({
-            "player_count": player_count,
-            "learning_rate": learning_rate,
-            "opponent_pool": opponent_pool,
-            "seed_index": seed_offset,
-            "final_vp_mean": float(sum(tail) / len(tail)) if tail else 0.0,
-            "rounds": rounds_per_run,
-        })
-        combos_done.add(_lr_combo_key(player_count, learning_rate, opponent_pool, seed_offset))
-        added += 1
+        try:
+            config = GameConfig(random_seed=seed + seed_offset, player_count=player_count)
+            _trainee, running_vp = train(
+                config, rounds_per_run, learning_rate=learning_rate, opponent_pool=opponent_pool,
+                use_internal_progress=False,
+            )
+            tail = running_vp[-max(1, len(running_vp) // 20):] if running_vp else []
+            new_row = {
+                "player_count": player_count,
+                "learning_rate": learning_rate,
+                "opponent_pool": opponent_pool,
+                "seed_index": seed_offset,
+                "final_vp_mean": float(sum(tail) / len(tail)) if tail else 0.0,
+                "rounds": rounds_per_run,
+            }
+            new_frame = pl.DataFrame([new_row])
+            if os.path.exists(output_csv):
+                existing_frame = pl.read_csv(output_csv)
+                combined = pl.concat([existing_frame, new_frame], how="diagonal_relaxed")
+            else:
+                combined = new_frame
+            combined.write_csv(output_csv)
+
+            combos_done.add(_lr_combo_key(player_count, learning_rate, opponent_pool, seed_offset))
+            added += 1
+        except Exception as error:  # noqa: BLE001 - isolation par combinaison
+            _record_failed_unit(
+                manifest, "lr_sweep", _lr_combo_key(player_count, learning_rate, opponent_pool, seed_offset), error,
+            )
+            progress.log(f"[red]Combinaison de balayage échouée, ignorée : {error!r}[/red]")
+
+        coverage["combos_done"] = sorted(combos_done)
+        coverage["output_csv"] = output_csv
+        manifest["lr_sweep_coverage"] = coverage
+        _save_manifest(manifest)
+
         progress.advance(
             task_id, 1,
             description=(
@@ -492,18 +653,6 @@ def _sweep_hyperparameters_incremental(
         )
     progress.complete_task(task_id, description="Balayage d'hyperparamètres — terminé")
 
-    if new_rows:
-        new_frame = pl.DataFrame(new_rows)
-        if os.path.exists(output_csv):
-            existing_frame = pl.read_csv(output_csv)
-            combined = pl.concat([existing_frame, new_frame], how="diagonal_relaxed")
-        else:
-            combined = new_frame
-        combined.write_csv(output_csv)
-
-    coverage["combos_done"] = sorted(combos_done)
-    coverage["output_csv"] = output_csv
-    manifest["lr_sweep_coverage"] = coverage
     return {"output_csv": output_csv, "new_combos": added}
 
 
@@ -562,16 +711,21 @@ def _attempt_distributed_training_incremental(
     redis_port: int,
 ) -> Dict[str, Any]:
     """
-    Continue (ou démarre) l'entraînement distribué de l'agent neuronal pour chaque nombre de joueurs de la grille, si Redis est joignable.
+    Continue (ou démarre) l'entraînement distribué de l'agent neuronal pour chaque nombre de joueurs de la grille sous curriculum de
+    règles varié, si Redis est joignable.
 
     Paramètre `manifest` : manifeste cumulatif, mis à jour en place avec les métadonnées du modèle neuronal par nombre de joueurs.
     Paramètre `player_counts` : nombres de joueurs à couvrir.
-    Paramètre `steps_increment` : nombre d'étapes de gradient supplémentaires par nombre de joueurs.
+    Paramètre `steps_increment` : nombre total d'étapes de gradient supplémentaires par nombre de joueurs, identique quel que soit le
+    nombre de blocs de curriculum parcourus.
     Paramètre `redis_host`, `redis_port` : coordonnées du serveur Redis à tester.
-    Retourne un dictionnaire résumant, par nombre de joueurs, si l'entraînement a été exécuté et à partir de quels poids repris. Effet de
-    bord : si Redis est joignable, exécute un entraînement distribué complet par nombre de joueurs, en reprenant les poids existants
-    plutôt que d'en repartir de zéro.
+    Retourne un dictionnaire résumant, par nombre de joueurs, si l'entraînement a été exécuté, à partir de quels poids repris, et le
+    nombre de blocs de curriculum effectivement parcourus. Effet de bord : si Redis est joignable, exécute un entraînement distribué par
+    nombre de joueurs, réparti sur `min(_CURRICULUM_BLOCKS, steps_increment)` blocs consécutifs, chacun utilisant une configuration de
+    règles tirée aléatoirement dans la grille étendue de présets et reprenant les poids du bloc précédent ; un bloc dont la configuration
+    s'avère structurellement invalide est ignoré sans interrompre les blocs suivants. Sauvegarde le manifeste après chaque bloc.
     """
+    from research.run_simulation import _RULE_PRESETS
     from training.launch_distributed import launch
     from training.replay_buffer import RedisReplayBuffer
 
@@ -585,38 +739,77 @@ def _attempt_distributed_training_incremental(
         return {"executed": False, "reason": "Redis non joignable."}
 
     results: Dict[str, Any] = {}
+    curriculum_rng = random.Random("pipeline_distributed_curriculum_v1")
+    preset_names = ["base"] + [name for name in _RULE_PRESETS.keys()]
+
     for player_count in player_counts:
         key = _model_key("pipeline_torch_rl_weights", player_count)
         existing = manifest["models"].get(key)
         resume_path = existing.get("latest_weights_path") if existing and os.path.exists(existing.get("latest_weights_path", "")) else None
+        rounds_already = existing.get("rounds_trained_total", 0) if existing else 0
+        curriculum_log: List[Dict[str, Any]] = list(existing.get("curriculum_log", [])) if existing else []
+
         _console.print(
             console_theme.info_text(
                 f"Modèle neuronal p{player_count} : "
-                + (f"reprise depuis {resume_path}." if resume_path else "démarrage d'un nouveau modèle.")
+                + (f"reprise depuis {resume_path}, curriculum de règles varié." if resume_path else "démarrage d'un nouveau modèle, curriculum de règles varié.")
             )
         )
-        launch(
-            num_workers=max(1, os.cpu_count() or 1),
-            rounds_per_worker_batch=20,
-            opponent_pool="mixed",
-            player_count=player_count,
-            redis_host=redis_host,
-            redis_port=redis_port,
-            batch_size=64,
-            total_steps=steps_increment,
-            resume_weights=resume_path,
-            model_name="pipeline_torch_rl_weights",
-        )
-        latest_weights = naming.build_weights_filename(
-            model_name="pipeline_torch_rl_weights", player_count=player_count, learning_rate=1e-3,
-            rounds=(existing.get("rounds_trained_total", 0) if existing else 0) + steps_increment, extension="pt",
-        )
-        rounds_trained_total = (existing.get("rounds_trained_total", 0) if existing else 0) + steps_increment
-        manifest["models"][key] = {
-            "latest_weights_path": latest_weights if os.path.exists(latest_weights) else resume_path,
-            "rounds_trained_total": rounds_trained_total,
+
+        block_sizes = _curriculum_blocks(steps_increment, _CURRICULUM_BLOCKS)
+        current_resume = resume_path
+        steps_done_this_run = 0
+
+        for block_index, block_steps in enumerate(block_sizes):
+            preset_name = curriculum_rng.choice(preset_names)
+            overrides = dict(_RULE_PRESETS.get(preset_name, {})) if preset_name != "base" else {}
+            try:
+                launch(
+                    num_workers=max(1, os.cpu_count() or 1),
+                    rounds_per_worker_batch=20,
+                    opponent_pool=curriculum_rng.choice(["greedy", "rule_based", "mixed"]),
+                    player_count=player_count,
+                    redis_host=redis_host,
+                    redis_port=redis_port,
+                    batch_size=64,
+                    total_steps=block_steps,
+                    resume_weights=current_resume,
+                    model_name="pipeline_torch_rl_weights",
+                    config_overrides=overrides,
+                )
+            except ValueError as error:
+                _console.print(
+                    console_theme.warning_text(
+                        f"Bloc distribué '{preset_name}' invalide pour p{player_count} ({error}), bloc ignoré."
+                    )
+                )
+                _record_failed_unit(manifest, "distributed_training_block", f"{key}:{preset_name}", error)
+                continue
+            except Exception as error:  # noqa: BLE001 - isolation par bloc, ne bloque pas les nombres de joueurs suivants
+                _console.print(console_theme.error_text(f"Bloc distribué p{player_count} échoué : {error!r}"))
+                _record_failed_unit(manifest, "distributed_training_block", f"{key}:{preset_name}", error)
+                continue
+
+            steps_done_this_run += block_steps
+            rounds_trained_total_estimate = rounds_already + steps_done_this_run
+            latest_weights = naming.build_weights_filename(
+                model_name="pipeline_torch_rl_weights", player_count=player_count, learning_rate=1e-3,
+                rounds=rounds_trained_total_estimate, extension="pt",
+            )
+            if os.path.exists(latest_weights):
+                current_resume = latest_weights
+            curriculum_log.append({"rule_preset": preset_name, "steps": block_steps})
+
+            manifest["models"][key] = {
+                "latest_weights_path": current_resume,
+                "rounds_trained_total": rounds_already + steps_done_this_run,
+                "curriculum_log": curriculum_log[-300:],
+            }
+            _save_manifest(manifest)
+
+        results[str(player_count)] = {
+            "executed": True, "resumed_from": resume_path, "blocks_completed": len(block_sizes),
         }
-        results[str(player_count)] = {"executed": True, "resumed_from": resume_path}
     return {"executed": True, "per_player_count": results}
 
 
@@ -639,7 +832,8 @@ def _simulate_baselines_incremental(
     Paramètre `killer` : indicateur d'arrêt propre, consulté entre deux combinaisons.
     Retourne un dictionnaire résumant, par combinaison, le nombre total de parties désormais couvertes et le dernier fichier Parquet
     produit. Effet de bord : lance une campagne Ray par combinaison non interrompue, écrivant systématiquement un nouveau fichier
-    Parquet distinct plutôt que d'écraser les segments déjà produits par des lancements antérieurs.
+    Parquet distinct plutôt que d'écraser les segments déjà produits par des lancements antérieurs ; sauvegarde le manifeste après chaque
+    combinaison individuellement, et isole toute exception d'une combinaison des combinaisons suivantes.
     """
     from research.run_simulation import _RULE_PRESETS, launch_research
 
@@ -662,25 +856,30 @@ def _simulate_baselines_incremental(
                 f"+{games_increment} parties (total après cette exécution : {coverage['games_done'] + games_increment})"
             )
         )
-        launch_research(
-            total_games=games_increment,
-            player_count=player_count,
-            rounds_per_game=rounds_per_game,
-            agent_profile=profile,
-            num_workers=max(1, os.cpu_count() or 1),
-            output_parquet=output_path,
-            base_seed=coverage["seed_cursor"],
-            experiment_name=f"pipeline_baseline_{preset}_{profile}",
-            config_overrides=_RULE_PRESETS.get(preset, {}),
-            progress_chunk_size=_PROGRESS_CHUNK_SIZE,
-            shutdown_ray=False,
-        )
-
-        coverage["games_done"] += games_increment
-        coverage["seed_cursor"] += games_increment
-        coverage.setdefault("parquet_paths", []).append(output_path)
-        manifest["baseline_coverage"][key] = coverage
-        results[key] = coverage
+        try:
+            launch_research(
+                total_games=games_increment,
+                player_count=player_count,
+                rounds_per_game=rounds_per_game,
+                agent_profile=profile,
+                num_workers=max(1, os.cpu_count() or 1),
+                output_parquet=output_path,
+                base_seed=coverage["seed_cursor"],
+                experiment_name=f"pipeline_baseline_{preset}_{profile}",
+                config_overrides=_RULE_PRESETS.get(preset, {}),
+                progress_chunk_size=_PROGRESS_CHUNK_SIZE,
+                shutdown_ray=False,
+            )
+            coverage["games_done"] += games_increment
+            coverage["seed_cursor"] += games_increment
+            coverage.setdefault("parquet_paths", []).append(output_path)
+            manifest["baseline_coverage"][key] = coverage
+            results[key] = coverage
+        except Exception as error:  # noqa: BLE001 - isolation par combinaison
+            _console.print(console_theme.error_text(f"Combinaison de référence échouée, ignorée : {key} ({error!r})"))
+            _record_failed_unit(manifest, "baseline", key, error)
+        finally:
+            _save_manifest(manifest)
     return results
 
 
@@ -704,8 +903,9 @@ def _evaluate_trained_agent_incremental(
     Paramètre `profiles` : profils heuristiques disponibles pour occuper les sièges adverses.
     Paramètre `killer` : indicateur d'arrêt propre.
     Retourne un dictionnaire résumant la couverture par combinaison. Effet de bord : lance une campagne Ray par combinaison, en utilisant
-    systématiquement le modèle linéaire le plus récemment entraîné pour le nombre de joueurs concerné, et en écrivant un nouveau fichier
-    CSV distinct à chaque appel plutôt que d'écraser les résultats antérieurs.
+    systématiquement le modèle linéaire le plus récemment entraîné pour le nombre de joueurs concerné, en écrivant un nouveau fichier
+    CSV distinct à chaque appel, en sauvegardant le manifeste après chaque combinaison individuellement, et en isolant toute exception
+    d'une combinaison des combinaisons suivantes.
     """
     from research.evaluate_agent import launch_evaluation
     from research.run_simulation import _RULE_PRESETS
@@ -736,23 +936,29 @@ def _evaluate_trained_agent_incremental(
                 f"Évaluation {combo_index + 1}/{len(combos)} — p{player_count} / {preset} : +{games_increment} parties"
             )
         )
-        launch_evaluation(
-            total_games=games_increment,
-            seat_profiles=seat_profiles,
-            rounds_per_game=rounds_per_game,
-            num_workers=max(1, os.cpu_count() or 1),
-            base_seed=coverage["seed_cursor"],
-            experiment_name=f"pipeline_evaluation_{preset}",
-            config_overrides=_RULE_PRESETS.get(preset, {}),
-            seat_weights=seat_weights,
-            output_csv=output_csv,
-            shutdown_ray=False,
-        )
-        coverage["games_done"] += games_increment
-        coverage["seed_cursor"] += games_increment
-        coverage.setdefault("csv_paths", []).append(output_csv)
-        manifest["evaluation_coverage"][key] = coverage
-        results[key] = coverage
+        try:
+            launch_evaluation(
+                total_games=games_increment,
+                seat_profiles=seat_profiles,
+                rounds_per_game=rounds_per_game,
+                num_workers=max(1, os.cpu_count() or 1),
+                base_seed=coverage["seed_cursor"],
+                experiment_name=f"pipeline_evaluation_{preset}",
+                config_overrides=_RULE_PRESETS.get(preset, {}),
+                seat_weights=seat_weights,
+                output_csv=output_csv,
+                shutdown_ray=False,
+            )
+            coverage["games_done"] += games_increment
+            coverage["seed_cursor"] += games_increment
+            coverage.setdefault("csv_paths", []).append(output_csv)
+            manifest["evaluation_coverage"][key] = coverage
+            results[key] = coverage
+        except Exception as error:  # noqa: BLE001 - isolation par combinaison
+            _console.print(console_theme.error_text(f"Combinaison d'évaluation échouée, ignorée : {key} ({error!r})"))
+            _record_failed_unit(manifest, "evaluation", key, error)
+        finally:
+            _save_manifest(manifest)
     return results
 
 
@@ -780,9 +986,9 @@ def _run_combinatorial_search_incremental(
     Paramètre `seed` : graine de base de cette itération.
     Paramètre `run_index` : index du lancement de pipeline courant, utilisé pour distinguer le nom d'expérience d'une itération à l'autre.
     Paramètre `killer` : indicateur d'arrêt propre, consulté avant le lancement.
-    Retourne le chemin du fichier manifeste CSV agrégé produit, ou `None` si l'exécution a été sautée (arrêt demandé). Effet de bord :
-    exécute une campagne par combinaison du produit cartésien, écrit un nouveau manifeste CSV distinct à chaque itération de pipeline
-    plutôt que d'écraser les précédents.
+    Retourne le chemin du fichier manifeste CSV agrégé produit, ou `None` si l'exécution a été sautée (arrêt demandé) ou a échoué.
+    Effet de bord : exécute une campagne par combinaison du produit cartésien, écrit un nouveau manifeste CSV distinct à chaque
+    itération de pipeline plutôt que d'écraser les précédents.
     """
     if killer.should_stop:
         return None
@@ -796,16 +1002,22 @@ def _run_combinatorial_search_incremental(
             f"{len(rule_presets)} présets x {len(rounds_per_game_values)} durées, {games_per_combo} parties/combo"
         )
     )
-    manifest_path = run_grid(
-        experiment_name=experiment_name,
-        agent_profiles=profiles,
-        player_counts=player_counts,
-        rule_presets=rule_presets,
-        rounds_per_game_values=rounds_per_game_values,
-        games_per_combo=games_per_combo,
-        num_workers=max(1, os.cpu_count() or 1),
-        base_seed=seed,
-    )
+    try:
+        manifest_path = run_grid(
+            experiment_name=experiment_name,
+            agent_profiles=profiles,
+            player_counts=player_counts,
+            rule_presets=rule_presets,
+            rounds_per_game_values=rounds_per_game_values,
+            games_per_combo=games_per_combo,
+            num_workers=max(1, os.cpu_count() or 1),
+            base_seed=seed,
+        )
+    except Exception as error:  # noqa: BLE001 - la recherche combinatoire ne doit jamais interrompre le reste du pipeline
+        _console.print(console_theme.error_text(f"Recherche combinatoire échouée : {error!r}"))
+        _record_failed_unit(manifest, "combinatorial_search", experiment_name, error)
+        return None
+
     combinatorial_coverage = manifest.get("combinatorial_coverage", {})
     combinatorial_coverage.setdefault("manifest_paths", []).append(manifest_path)
     combinatorial_coverage["latest_manifest_path"] = manifest_path
@@ -836,8 +1048,9 @@ def _run_tournament_incremental(
     Paramètre `profiles` : profils heuristiques disponibles pour occuper les sièges de remplissage.
     Paramètre `killer` : indicateur d'arrêt propre.
     Retourne un dictionnaire résumant, par nombre de joueurs, le champion désigné et le VP cumulé moyen de chaque modèle. Effet de bord :
-    lance une campagne par nombre de joueurs couvert, écrit un nouveau fichier CSV distinct par confrontation. Un nombre de joueurs sans
-    modèle linéaire et sans modèle neuronal disponibles simultanément est ignoré.
+    lance une campagne par nombre de joueurs couvert, écrit un nouveau fichier CSV distinct par confrontation, sauvegarde le manifeste
+    après chaque nombre de joueurs traité, et isole toute exception d'un nombre de joueurs des nombres de joueurs suivants. Un nombre de
+    joueurs sans modèle linéaire et sans modèle neuronal disponibles simultanément est ignoré.
     """
     from research.evaluate_agent import launch_evaluation
 
@@ -875,34 +1088,40 @@ def _run_tournament_incremental(
         _console.print(
             console_theme.info_text(f"Tournoi p{player_count} — rl_agent vs torch_rl_agent : {games} parties")
         )
-        launch_evaluation(
-            total_games=games,
-            seat_profiles=seat_profiles,
-            rounds_per_game=rounds_per_game,
-            num_workers=max(1, os.cpu_count() or 1),
-            base_seed=seed_base + player_count,
-            experiment_name="pipeline_tournament",
-            seat_weights=seat_weights,
-            output_csv=output_csv,
-            shutdown_ray=False,
-        )
+        try:
+            launch_evaluation(
+                total_games=games,
+                seat_profiles=seat_profiles,
+                rounds_per_game=rounds_per_game,
+                num_workers=max(1, os.cpu_count() or 1),
+                base_seed=seed_base + player_count,
+                experiment_name="pipeline_tournament",
+                seat_weights=seat_weights,
+                output_csv=output_csv,
+                shutdown_ray=False,
+            )
 
-        import polars as pl
+            import polars as pl
 
-        frame = pl.read_csv(output_csv)
-        summary = (
-            frame.filter(pl.col("profile").is_in(["rl_agent", "torch_rl_agent"]))
-            .group_by("profile")
-            .agg(pl.col("cumulative_vp").mean().alias("mean_cumulative_vp"))
-        )
-        scores = {row["profile"]: float(row["mean_cumulative_vp"]) for row in summary.to_dicts()}
-        champion = max(scores, key=lambda profile: scores[profile]) if scores else None
-        results[str(player_count)] = {
-            "scores": scores,
-            "champion": champion,
-            "output_csv": output_csv,
-        }
-    manifest["tournament_results"] = {**manifest.get("tournament_results", {}), **results}
+            frame = pl.read_csv(output_csv)
+            summary = (
+                frame.filter(pl.col("profile").is_in(["rl_agent", "torch_rl_agent"]))
+                .group_by("profile")
+                .agg(pl.col("cumulative_vp").mean().alias("mean_cumulative_vp"))
+            )
+            scores = {row["profile"]: float(row["mean_cumulative_vp"]) for row in summary.to_dicts()}
+            champion = max(scores, key=lambda profile: scores[profile]) if scores else None
+            results[str(player_count)] = {
+                "scores": scores,
+                "champion": champion,
+                "output_csv": output_csv,
+            }
+        except Exception as error:  # noqa: BLE001 - isolation par nombre de joueurs
+            _console.print(console_theme.error_text(f"Tournoi p{player_count} échoué, ignoré : {error!r}"))
+            _record_failed_unit(manifest, "tournament", str(player_count), error)
+        finally:
+            manifest["tournament_results"] = {**manifest.get("tournament_results", {}), **results}
+            _save_manifest(manifest)
     return results
 
 
@@ -1008,20 +1227,25 @@ def _generate_final_report(manifest: Dict[str, Any], figures_version: Optional[i
     Retourne le chemin du rapport écrit. Effet de bord : écrit un rapport versionné `data/final_report_v{N}.md` (N = nombre de lancements
     de pipeline effectués), ainsi qu'une copie de convenance `data/final_report_latest.md` pointant toujours vers le dernier rapport.
     """
-    naming.ensure_dir("data")
+    project_paths.ensure_all()
     run_index = len(manifest["runs"])
-    report_path = os.path.join("data", f"final_report_v{run_index}.md")
+    report_path = os.path.join(project_paths.DATA_DIR, f"final_report_v{run_index}.md")
 
     lines = ["# Rapport de synthèse cumulatif de la campagne de recherche", ""]
 
-    lines.append("## Modèles entraînés (politique linéaire et neuronale)")
+    lines.append("## Modèles entraînés (politique linéaire et neuronale, sous curriculum de règles varié)")
     for key, info in sorted(manifest["models"].items()):
+        curriculum_summary = ""
+        curriculum_log = info.get("curriculum_log")
+        if curriculum_log:
+            distinct_presets = sorted({entry.get("rule_preset", "?") for entry in curriculum_log})
+            curriculum_summary = f", {len(curriculum_log)} bloc(s) de curriculum cumulés, présets rencontrés : {len(distinct_presets)}"
         lines.append(
             f"- `{key}` : {info.get('rounds_trained_total', '?')} manches/étapes cumulées, "
             f"poids `{info.get('latest_weights_path', 'indisponible')}`, "
             f"VP moyen récent : {info.get('final_vp_mean', 'n/a')}, "
             f"taux d'apprentissage utilisé : {info.get('learning_rate_used', 'n/a')}, "
-            f"pool d'adversaires : {info.get('opponent_pool_used', 'n/a')}"
+            f"pool d'adversaires : {info.get('opponent_pool_used', 'n/a')}{curriculum_summary}"
         )
     lines.append("")
 
@@ -1087,6 +1311,16 @@ def _generate_final_report(manifest: Dict[str, Any], figures_version: Optional[i
         lines.append("- Aucune vérification statistique encore exécutée.")
     lines.append("")
 
+    lines.append("## Unités de travail ayant échoué (isolées, sans impact sur le reste de la campagne)")
+    failed_units = manifest.get("failed_units", [])
+    if failed_units:
+        lines.append(f"- {len(failed_units)} échec(s) isolé(s) journalisé(s) (200 derniers conservés) :")
+        for entry in failed_units[-20:]:
+            lines.append(f"  - [{entry.get('kind')}] `{entry.get('key')}` : {entry.get('error')}")
+    else:
+        lines.append("- Aucun échec isolé journalisé.")
+    lines.append("")
+
     lines.append("## Graphiques")
     if figures_version is not None:
         lines.append(f"- Dernière version générée : `figures/v{figures_version}/`")
@@ -1095,7 +1329,7 @@ def _generate_final_report(manifest: Dict[str, Any], figures_version: Optional[i
     with open(report_path, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines))
 
-    latest_path = os.path.join("data", "final_report_latest.md")
+    latest_path = os.path.join(project_paths.DATA_DIR, "final_report_latest.md")
     with open(latest_path, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines))
 
@@ -1114,8 +1348,14 @@ def _print_manifest_summary(manifest: Dict[str, Any]) -> None:
     models_table.add_column("Modèle")
     models_table.add_column("Manches/étapes cumulées")
     models_table.add_column("VP moyen récent")
+    models_table.add_column("Blocs de curriculum")
     for key, info in sorted(manifest["models"].items()):
-        models_table.add_row(key, str(info.get("rounds_trained_total", "?")), str(info.get("final_vp_mean", "n/a")))
+        models_table.add_row(
+            key,
+            str(info.get("rounds_trained_total", "?")),
+            str(info.get("final_vp_mean", "n/a")),
+            str(len(info.get("curriculum_log", []))),
+        )
     _console.print(models_table)
 
     coverage_table = Table(title=f"[{console_theme.STYLE_STEP}]Couverture cumulée[/{console_theme.STYLE_STEP}]", expand=True)
@@ -1160,6 +1400,15 @@ def _print_manifest_summary(manifest: Dict[str, Any]) -> None:
             validation_table.add_row(check_name, status)
         _console.print(validation_table)
 
+    failed_units = manifest.get("failed_units", [])
+    if failed_units:
+        _console.print(
+            console_theme.warning_text(
+                f"{len(failed_units)} unité(s) de travail ont échoué isolément durant cette campagne (voir le rapport de synthèse "
+                "pour le détail) ; le reste de la campagne s'est poursuivi normalement."
+            )
+        )
+
 
 def run_pipeline(
     player_counts: List[int],
@@ -1193,9 +1442,11 @@ def run_pipeline(
     Paramètre `player_counts` : nombres de joueurs couverts par la grille d'analyse.
     Paramètre `rule_presets` : présets de règles couverts par la grille d'analyse (voir `_resolve_rule_presets` pour la résolution du
     mode `'auto'`).
-    Paramètre `training_rounds_increment` : manches d'entraînement supplémentaires ajoutées à chaque modèle linéaire lors de cet appel.
+    Paramètre `training_rounds_increment` : manches d'entraînement supplémentaires ajoutées à chaque modèle linéaire lors de cet appel,
+    réparties sur un curriculum de règles variées sans jamais rallonger ce volume total.
     Paramètre `lr_sweep_rounds`, `lr_sweep_seeds`, `learning_rates`, `opponent_pools` : paramètres du balayage d'hyperparamètres.
-    Paramètre `distributed_steps_increment` : étapes de gradient supplémentaires ajoutées à chaque modèle neuronal, si Redis est joignable.
+    Paramètre `distributed_steps_increment` : étapes de gradient supplémentaires ajoutées à chaque modèle neuronal, si Redis est
+    joignable, réparties sur un curriculum de règles variées sans jamais rallonger ce volume total.
     Paramètre `baseline_games_increment` : parties supplémentaires ajoutées à chaque combinaison de référence.
     Paramètre `baseline_rounds_per_game` : manches par partie de référence.
     Paramètre `evaluation_games_increment` : parties supplémentaires ajoutées à chaque combinaison d'évaluation.
@@ -1209,9 +1460,11 @@ def run_pipeline(
     Paramètre `skip_combinatorial` : si vrai, saute l'étape de recherche combinatoire.
     Paramètre `skip_tournament` : si vrai, saute l'étape de tournoi linéaire contre neuronal.
     Paramètre `skip_validation` : si vrai, saute l'étape de vérification statistique automatisée.
-    Retourne `None`. Effet de bord : exécute toutes les étapes ci-dessus, sauvegarde le manifeste après chacune (résistant à une
-    interruption brutale entre deux étapes), régénère les graphiques (nouvelle version) et le rapport final, puis affiche un résumé complet.
+    Retourne `None`. Effet de bord : exécute toutes les étapes ci-dessus, sauvegarde le manifeste après chaque unité de travail
+    individuelle (résistant à une interruption brutale y compris au milieu d'une étape), régénère les graphiques (nouvelle version) et le
+    rapport final même si une ou plusieurs unités de travail ont échoué isolément, puis affiche un résumé complet.
     """
+    project_paths.ensure_all()
     manifest = _load_manifest()
     killer = GracefulKiller()
     profiles = _heuristic_profiles()
@@ -1232,14 +1485,22 @@ def run_pipeline(
             for player_count in player_counts:
                 if killer.should_stop:
                     break
-                _train_linear_agent_incremental(manifest, player_count, training_rounds_increment, seed, killer, progress)
+                try:
+                    _train_linear_agent_incremental(manifest, player_count, training_rounds_increment, seed, killer, progress)
+                except Exception as error:  # noqa: BLE001 - un modèle qui échoue ne doit pas bloquer les autres nombres de joueurs
+                    progress.log(f"[red]Entraînement linéaire p{player_count} échoué : {error!r}[/red]")
+                    _record_failed_unit(manifest, "linear_training", str(player_count), error)
                 _save_manifest(manifest)
 
             if not killer.should_stop:
-                _sweep_hyperparameters_incremental(
-                    manifest, player_counts, lr_sweep_rounds, seed + 5_000, learning_rates, opponent_pools,
-                    lr_sweep_seeds, killer, progress,
-                )
+                try:
+                    _sweep_hyperparameters_incremental(
+                        manifest, player_counts, lr_sweep_rounds, seed + 5_000, learning_rates, opponent_pools,
+                        lr_sweep_seeds, killer, progress,
+                    )
+                except Exception as error:  # noqa: BLE001
+                    progress.log(f"[red]Balayage d'hyperparamètres échoué : {error!r}[/red]")
+                    _record_failed_unit(manifest, "lr_sweep_step", "global", error)
                 _save_manifest(manifest)
 
             if not killer.should_stop:
@@ -1249,9 +1510,13 @@ def run_pipeline(
         # Le tableau de bord ci-dessus est refermé avant toute étape qui gère son propre affichage de progression.
 
         if not killer.should_stop and not skip_distributed:
-            _attempt_distributed_training_incremental(
-                manifest, player_counts, distributed_steps_increment, redis_host, redis_port,
-            )
+            try:
+                _attempt_distributed_training_incremental(
+                    manifest, player_counts, distributed_steps_increment, redis_host, redis_port,
+                )
+            except Exception as error:  # noqa: BLE001
+                _console.print(console_theme.error_text(f"Entraînement distribué échoué : {error!r}"))
+                _record_failed_unit(manifest, "distributed_training_step", "global", error)
             _save_manifest(manifest)
 
         if not killer.should_stop:
@@ -1284,15 +1549,20 @@ def run_pipeline(
 
         if not killer.should_stop and not skip_validation:
             _console.print(console_theme.info_text("Vérification statistique du moteur de règles…"))
-            validation_results = _run_statistical_validation(seed + 50_000, killer, round_count=validation_round_count)
-            manifest["validation_results"] = {
-                "run_index": run_index,
-                "checks": validation_results,
-                "all_passed": all(check["passed"] for check in validation_results.values()),
-            }
+            try:
+                validation_results = _run_statistical_validation(seed + 50_000, killer, round_count=validation_round_count)
+                manifest["validation_results"] = {
+                    "run_index": run_index,
+                    "checks": validation_results,
+                    "all_passed": all(check["passed"] for check in validation_results.values()),
+                }
+            except Exception as error:  # noqa: BLE001
+                _console.print(console_theme.error_text(f"Vérification statistique échouée : {error!r}"))
+                _record_failed_unit(manifest, "validation", "global", error)
             _save_manifest(manifest)
-    except Exception:  # noqa: BLE001 - on journalise puis on sauvegarde tout de même l'état accumulé
+    except Exception:  # noqa: BLE001 - filet de sécurité global, on journalise puis on sauvegarde tout de même l'état accumulé
         _console.print(console_theme.error_text(f"Erreur durant le pipeline :\n{traceback.format_exc()}"))
+        _save_manifest(manifest)
     finally:
         import ray
 
@@ -1303,11 +1573,14 @@ def run_pipeline(
             pass
 
     figures_version: Optional[int] = None
-    if not killer.should_stop:
+    try:
         _console.print(console_theme.info_text("Régénération de l'ensemble des graphiques…"))
         from research.generate_graphs import generate_all
 
         figures_version = generate_all()
+    except Exception as error:  # noqa: BLE001 - une régénération de graphiques échouée ne doit jamais empêcher le rapport final
+        _console.print(console_theme.error_text(f"Génération des graphiques échouée : {error!r}"))
+        _record_failed_unit(manifest, "graph_generation", "global", error)
 
     manifest["runs"].append({
         "started_at": run_started_at,
@@ -1341,13 +1614,16 @@ def main() -> None:
     couverture pour repartir d'une campagne vierge. L'option `--quick` réduit fortement tous les volumes de travail par itération, utile
     pour valider rapidement que le pipeline s'exécute de bout en bout sans erreur. Par défaut, `--rule-presets` vaut `'auto'`, qui étend
     la grille de règles couverte à l'intégralité des paramètres de `core.config.GameConfig` (chaque champ booléen basculé
-    individuellement, chaque valeur énumérée testée, plus des combinaisons aléatoires couvrant les interactions), et `--player-counts`
-    couvre par défaut l'ensemble des tailles de partie de 3 à 8 joueurs.
+    individuellement, chaque valeur énumérée testée, chaque paire de règles avancées structurantes croisée, plus des combinaisons
+    aléatoires couvrant les interactions), et `--player-counts` couvre par défaut l'ensemble des tailles de partie de 3 à 10 joueurs.
+    L'entraînement des agents (linéaire et neuronal) répartit désormais chaque incrément demandé sur un curriculum de blocs consécutifs
+    utilisant des configurations de règles variées, sans jamais rallonger le volume total d'entraînement par lancement.
     """
     parser = argparse.ArgumentParser(
-        description="Pipeline automatique incrémental : entraînement continu, grille de configurations étendue, graphiques versionnés."
+        description="Pipeline automatique incrémental : entraînement continu sous curriculum varié, grille de configurations étendue, "
+                     "graphiques versionnés."
     )
-    parser.add_argument("--player-counts", type=str, default="3,4,5,6,7,8")
+    parser.add_argument("--player-counts", type=str, default="3,4,5,6,7,8,9,10")
     parser.add_argument(
         "--rule-presets", type=str, default="auto",
         help="'auto' pour couvrir l'intégralité de la grille de paramètres générée automatiquement, ou une liste explicite "

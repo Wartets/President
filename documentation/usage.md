@@ -942,19 +942,43 @@ rédaction d'un rapport de synthèse dans `data/final_report_latest.md`.
 
 Par défaut, `--rule-presets` vaut `'auto'` : le pipeline construit automatiquement (`_build_extended_rule_presets`) une grille couvrant
 l'intégralité des paramètres de `GameConfig` — chaque champ booléen basculé individuellement dans les deux sens (`toggle_<champ>_on`/
-`_off`), chaque mode de distribution de VP, chaque sémantique de passe, plusieurs rangs magiques et de saut de tour, les deux types de
-pénalité de sortie, chaque rôle ciblé par l'attribution stricte du reste, une configuration "tout activé" et une configuration "tout
-désactivé", ainsi que 24 combinaisons aléatoires reproductibles capturant les interactions entre règles — croisée avec l'intégralité des
-profils heuristiques disponibles et des nombres de joueurs demandés. Le produit cartésien résultant (généralement plusieurs centaines de
-combinaisons distinctes) n'est jamais couvert intégralement en un seul lancement : chaque combinaison de référence est priorisée par
-couverture cumulée croissante (`_prioritize_baseline_combos`), garantissant qu'un lancement ajoute toujours du travail neuf sur les
-combinaisons les moins couvertes, et que la grille complète converge vers une couverture homogène au fil de lancements successifs. Pour
-restreindre explicitement la grille à un sous-ensemble de présets nommés plutôt qu'à la grille étendue complète, passer une liste
-explicite : `--rule-presets base,straights,full`.
+`_off`), chaque mode de distribution de VP, chaque sémantique de passe, plusieurs rangs magiques et de saut de tour, plusieurs nombres de
+paquets forcés et de joueurs ouvreurs de la première manche, les deux types de pénalité de sortie avec plusieurs tailles de reprise de
+cartes, chaque rôle ciblé par l'attribution stricte du reste, une configuration "tout activé" et une configuration "tout désactivé",
+l'intégralité des paires de règles avancées structurantes (Suites, Interception, Double Révolution, Putsch, Saut de Tour, pénalité de
+sortie étendue, Taxe Aveugle, attribution stricte du reste, forçage par égalité) activées simultanément deux à deux afin de capturer les
+interactions à deux facteurs qu'un balayage strictement paramètre-par-paramètre ne peut jamais révéler, ainsi que 60 combinaisons
+aléatoires reproductibles — croisée avec l'intégralité des profils heuristiques disponibles et des nombres de joueurs demandés (3 à 10
+par défaut). Le produit cartésien résultant (plusieurs centaines de combinaisons distinctes) n'est jamais couvert intégralement en un
+seul lancement : chaque combinaison de référence est priorisée par couverture cumulée croissante (`_prioritize_baseline_combos`),
+garantissant qu'un lancement ajoute toujours du travail neuf sur les combinaisons les moins couvertes, et que la grille complète converge
+vers une couverture homogène au fil de lancements successifs. Pour restreindre explicitement la grille à un sous-ensemble de présets
+nommés plutôt qu'à la grille étendue complète, passer une liste explicite : `--rule-presets base,straights,full`.
 
-La progression est journalisée dans `data/pipeline_manifest.json`. Si l'exécution est interrompue (arrêt manuel, panne), un nouveau
-lancement de la même commande reprend automatiquement à la couverture la moins avancée, sans recommencer le travail déjà accompli.
-L'option `--reset-manifest` supprime ce fichier d'état et force une reprise complète depuis le début :
+La progression est journalisée dans `data/pipeline_manifest.json`, résolu de façon absolue par `project_paths.py` indépendamment du
+répertoire de travail courant : lancer `python -m research.run_pipeline` puis, séparément, `python -m research.generate_graphs`, opère
+toujours sur le même `data/` et le même `figures/`, quel que soit le répertoire depuis lequel chaque commande est invoquée. Le manifeste
+est désormais sauvegardé après chaque combinaison individuelle traitée (une partie de référence, une évaluation, un bloc de curriculum
+d'entraînement), et non plus seulement après un bloc entier de plusieurs dizaines de combinaisons : une interruption brutale (Ctrl+C,
+SIGTERM, arrêt du processus par le système d'exploitation) ne fait donc jamais perdre plus que la combinaison en cours au moment de
+l'interruption. Toute exception levée par une combinaison individuelle (échec transitoire d'un acteur Ray, configuration de règles
+structurellement invalide pour ce nombre de joueurs) est capturée, journalisée dans `manifest["failed_units"]` et affichée à la console,
+sans jamais interrompre les combinaisons suivantes ni empêcher la génération finale des graphiques et du rapport de synthèse.
+
+L'entraînement des agents (`rl_agent` linéaire et `torch_rl_agent` neuronal) ne rallonge jamais sa durée totale par lancement au-delà de
+`--training-rounds-increment`/`--distributed-steps-increment` : ce volume est désormais réparti sur un curriculum de plusieurs blocs
+consécutifs (huit au maximum), chacun utilisant une configuration de règles — et, pour l'agent linéaire, un pool d'adversaires — tirée
+aléatoirement dans la grille étendue de présets, plutôt qu'une unique configuration figée sur toute la durée de l'incrément. Les poids
+sont conservés d'un bloc à l'autre (chaque bloc reprend l'entraînement là où le précédent l'a laissé), et le journal des blocs traversés
+(préset de règles, pool d'adversaires, nombre de manches/étapes) est conservé dans le manifeste sous la clé `curriculum_log` de chaque
+modèle, consultable dans le rapport de synthèse. Ce choix vise à produire des politiques robustes à la diversité des règles activables
+plutôt que sur-ajustées à un unique jeu de règles par défaut. Un bloc dont la configuration de règles s'avère structurellement invalide
+pour le nombre de joueurs concerné (contrainte de `GameConfig.__post_init__`) retombe silencieusement sur la configuration de base pour
+ce bloc plutôt que d'interrompre l'entraînement.
+
+Si l'exécution est interrompue (arrêt manuel, panne), un nouveau lancement de la même commande reprend automatiquement à la couverture
+la moins avancée, sans recommencer le travail déjà accompli. L'option `--reset-manifest` supprime ce fichier d'état et force une reprise
+complète depuis le début :
 
 ```bash
 python -m research.run_pipeline --reset-manifest

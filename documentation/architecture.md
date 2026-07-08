@@ -302,6 +302,45 @@ training.launch_distributed.launch(...)
 
 ## 12. Couche d'orchestration de bout en bout (`research.run_pipeline`, `research.generate_graphs`)
 
+### 12.0. Ancrage des chemins de données (`project_paths`) et isolation par unité de travail
+
+`data/`, `weights/` et `figures/` sont résolus par `project_paths.py` en chemins absolus dérivés de l'emplacement de ce module (donc de
+la racine du dépôt), plutôt qu'en chaînes littérales relatives au répertoire de travail courant du processus. Ce choix élimine une
+classe de bugs silencieux où deux invocations successives (`research.run_pipeline` exécuté depuis un répertoire, puis
+`research.generate_graphs` relancé isolément depuis un autre) résolvent des racines différentes et opèrent chacune sur un jeu de
+fichiers disjoint sans qu'aucune exception ne soit levée nulle part : la seconde commande semble alors ne « rien faire », alors qu'elle
+lit effectivement un `data/` vide et écrit dans un `figures/` que personne ne consulte. `naming.py` (nomenclature des fichiers de poids
+et de résultats) et `research.run_pipeline` (`_MANIFEST_PATH`) partagent cette même source de vérité.
+
+En complément, `research.run_pipeline` sauvegarde désormais le manifeste cumulatif après chaque unité de travail individuelle (une
+combinaison de simulation de référence, une combinaison d'évaluation, un bloc de curriculum d'entraînement, un nombre de joueurs de
+tournoi) plutôt qu'après un bloc entier de plusieurs dizaines d'unités, et isole toute exception levée par une unité individuelle du
+reste de la campagne (capturée, journalisée dans `manifest["failed_units"]`, affichée à la console, sans jamais interrompre les unités
+suivantes). Combinés, ces deux choix garantissent qu'une interruption brutale du processus (panne, arrêt système, `kill -9`) ne fait
+jamais perdre plus que l'unité de travail en cours au moment de l'interruption, et que la génération finale des graphiques et du rapport
+de synthèse a toujours lieu même si une partie de la campagne a rencontré des erreurs isolées.
+
+### 12.1. Curriculum de règles variées pour l'entraînement des agents
+
+`_train_linear_agent_incremental` (agent linéaire) et `_attempt_distributed_training_incremental` (agent neuronal) ne soumettent plus
+l'intégralité d'un incrément d'entraînement (`--training-rounds-increment`/`--distributed-steps-increment`) à une unique configuration
+de règles figée. Ce volume, dont la durée totale n'est jamais rallongée par lancement, est réparti sur `min(_CURRICULUM_BLOCKS,
+incrément)` blocs consécutifs (huit au maximum), chacun tirant aléatoirement une configuration de règles dans la grille étendue de
+présets (et, pour l'agent linéaire, un pool d'adversaires parmi `greedy`/`rule_based`/`mixed`, sauf si le balayage d'hyperparamètres a
+déjà désigné un pool meilleur pour ce nombre de joueurs, auquel cas ce pool reste fixe sur tous les blocs). Les poids de politique sont
+conservés d'un bloc au suivant (chaque bloc reprend l'entraînement exactement là où le précédent l'a laissé, via `initial_weights`/
+`resume_weights`), et le détail des blocs traversés (préset, pool, nombre de manches/étapes, graine) est conservé dans
+`manifest["models"][key]["curriculum_log"]`, borné aux 300 dernières entrées.
+
+Ce choix répond à une limite du comportement antérieur, où chaque modèle n'était jamais exposé qu'à la configuration `GameConfig`
+de base (aucune règle avancée activée) tout au long de son entraînement : sa politique n'avait alors aucune raison de généraliser à des
+parties utilisant Suites, Interception, Révolution renforcée ou toute autre combinaison de règles avancées, cette absence
+d'exposition n'étant révélée qu'a posteriori par les évaluations comparatives (`research.evaluate_agent`) menées, elles, sous des
+présets variés. Le curriculum expose désormais directement l'agent à cette variété pendant l'entraînement lui-même, à budget de
+calcul strictement identique. Un bloc dont la configuration de règles tirée s'avère structurellement invalide pour le nombre de joueurs
+concerné (`GameConfig.__post_init__` lève `ValueError`, par exemple Interception sans second paquet) retombe silencieusement sur la
+configuration de base pour ce bloc seul, sans interrompre les blocs suivants ni consommer de budget supplémentaire.
+
 `research.run_pipeline.run_pipeline` est le point d'entrée unique orchestrant, sans intervention humaine, l'ensemble du cycle de recherche :
 entraînement de l'agent linéaire (`training.train_rl`), tentative d'entraînement distribué de l'agent neuronal (`training.launch_distributed`,
 ignorée proprement si Redis n'est pas joignable plutôt que de bloquer le pipeline), simulations de référence sur le produit cartésien de

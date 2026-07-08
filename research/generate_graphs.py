@@ -34,9 +34,11 @@ import seaborn as sns
 
 sns.set_theme(style="whitegrid")
 
-DATA_DIR = "data"
-WEIGHTS_DIR = "weights"
-FIGURE_DIR = "figures"
+import project_paths
+
+DATA_DIR = project_paths.DATA_DIR
+WEIGHTS_DIR = project_paths.WEIGHTS_DIR
+FIGURE_DIR = project_paths.FIGURE_DIR
 
 _POINTS_TABLE = {
     "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10,
@@ -1187,46 +1189,69 @@ def generate_all(output_root: str = FIGURE_DIR) -> int:
     role_matrix = _role_transition_matrix(round_end_df)
     metrics_source_df = manifest_df if not manifest_df.empty else summary_df
 
+    def _safe(label: str, fn, *fn_args) -> None:
+        """
+        Exécute une fonction de tracé en isolant toute exception qu'elle pourrait lever.
+
+        Paramètre `label` : nom du graphique, utilisé uniquement pour le message d'avertissement en cas d'échec.
+        Paramètre `fn` : fonction de tracé à appeler.
+        Paramètre `fn_args` : arguments positionnels transmis à `fn`.
+        Retourne `None`. Effet de bord : appelle `fn(*fn_args)` ; si `fn` lève une exception, celle-ci est capturée et un message
+        d'avertissement est affiché, sans interrompre la génération des graphiques suivants. Ce comportement garantit qu'une exception
+        inattendue sur une source de données particulière (colonne absente, type inattendu) ne prive jamais l'utilisateur des dizaines
+        d'autres graphiques dont les données sont saines.
+        """
+        try:
+            fn(*fn_args)
+        except Exception as error:  # noqa: BLE001 - isolation volontaire par graphique
+            print(f"[generate_graphs] Graphique '{label}' ignoré suite à une erreur : {error!r}")
+
     # Graphiques historiques, corrigés.
-    _plot_vp_by_rank_violin(finished_df, version_dir)
-    _plot_win_rate_by_profile(profile_long_df, version_dir)
-    _plot_suboptimal_pass_rate(action_played_df, profile_long_df, version_dir)
-    _plot_action_validity_by_profile(profile_long_df, version_dir)
-    _plot_role_transition_heatmap(role_matrix, version_dir)
-    _plot_role_distribution_by_profile(round_end_df, profile_long_df, version_dir)
-    _plot_role_persistence_summary(role_matrix, version_dir)
-    _plot_gini_histogram(round_start_df, version_dir)
-    _plot_branching_factor_vs_players(metrics_source_df, version_dir)
-    _plot_combo_size_distribution(action_played_df, profile_long_df, version_dir)
-    _plot_actions_per_round_violin(action_played_df, version_dir)
-    _plot_e_rev_volatility_regression(metrics_source_df, version_dir)
-    _plot_opening_position_rank_regression(trick_start_df, finished_df, version_dir)
-    _plot_rule_trigger_counts(rule_triggered_df, version_dir)
-    _plot_training_learning_curves(history_df, version_dir)
-    _plot_putsch_efficiency(ask_putsch_df, putsch_invoked_df, finished_df, version_dir)
-    _plot_missed_interception_rate(interception_broadcast_df, interception_resolved_df, version_dir)
-    _plot_skip_turn_magnitude(rule_triggered_df, version_dir)
-    _plot_evaluation_violin(evaluation_df, version_dir)
-    _plot_evaluation_president_rate(evaluation_df, version_dir)
-    _plot_combo_power_bubble(action_played_df, version_dir)
-    _plot_learning_rate_sweep(lr_sweep_df, version_dir)
-    _plot_tournament_results(tournament_df, version_dir)
-    _plot_vp_convergence_check(finished_df, version_dir)
+    _safe("vp_by_rank_violin", _plot_vp_by_rank_violin, finished_df, version_dir)
+    _safe("win_rate_by_profile", _plot_win_rate_by_profile, profile_long_df, version_dir)
+    _safe("suboptimal_pass_rate", _plot_suboptimal_pass_rate, action_played_df, profile_long_df, version_dir)
+    _safe("action_validity_by_profile", _plot_action_validity_by_profile, profile_long_df, version_dir)
+    _safe("role_transition_heatmap", _plot_role_transition_heatmap, role_matrix, version_dir)
+    _safe("role_distribution_by_profile", _plot_role_distribution_by_profile, round_end_df, profile_long_df, version_dir)
+    _safe("role_persistence_summary", _plot_role_persistence_summary, role_matrix, version_dir)
+    _safe("gini_histogram", _plot_gini_histogram, round_start_df, version_dir)
+    _safe("branching_factor_vs_players", _plot_branching_factor_vs_players, metrics_source_df, version_dir)
+    _safe("combo_size_distribution", _plot_combo_size_distribution, action_played_df, profile_long_df, version_dir)
+    _safe("actions_per_round_violin", _plot_actions_per_round_violin, action_played_df, version_dir)
+    _safe("e_rev_volatility_regression", _plot_e_rev_volatility_regression, metrics_source_df, version_dir)
+    _safe("opening_position_rank_regression", _plot_opening_position_rank_regression, trick_start_df, finished_df, version_dir)
+    _safe("rule_trigger_counts", _plot_rule_trigger_counts, rule_triggered_df, version_dir)
+    _safe("training_learning_curves", _plot_training_learning_curves, history_df, version_dir)
+    _safe("putsch_efficiency", _plot_putsch_efficiency, ask_putsch_df, putsch_invoked_df, finished_df, version_dir)
+    _safe(
+        "missed_interception_rate", _plot_missed_interception_rate,
+        interception_broadcast_df, interception_resolved_df, version_dir,
+    )
+    _safe("skip_turn_magnitude", _plot_skip_turn_magnitude, rule_triggered_df, version_dir)
+    _safe("evaluation_violin", _plot_evaluation_violin, evaluation_df, version_dir)
+    _safe("evaluation_president_rate", _plot_evaluation_president_rate, evaluation_df, version_dir)
+    _safe("combo_power_bubble", _plot_combo_power_bubble, action_played_df, version_dir)
+    _safe("learning_rate_sweep", _plot_learning_rate_sweep, lr_sweep_df, version_dir)
+    _safe("tournament_results", _plot_tournament_results, tournament_df, version_dir)
+    _safe("vp_convergence_check", _plot_vp_convergence_check, finished_df, version_dir)
 
     # Graphiques transversaux et balayage systématique de paramètres.
-    _plot_branching_by_profile(profile_long_df, version_dir)
-    _plot_vp_by_profile_violin(profile_long_df, version_dir)
-    _plot_metric_correlation_heatmap(metrics_source_df, version_dir)
-    _plot_metric_pairplot(metrics_source_df, version_dir)
-    _plot_parallel_coordinates(metrics_source_df, version_dir)
-    _plot_profile_radar(profile_summary_df, version_dir)
-    _plot_parameter_impact_heatmap(metrics_source_df, version_dir)
-    _plot_parameter_sweep(metrics_source_df, version_dir)
+    _safe("branching_by_profile", _plot_branching_by_profile, profile_long_df, version_dir)
+    _safe("vp_by_profile_violin", _plot_vp_by_profile_violin, profile_long_df, version_dir)
+    _safe("metric_correlation_heatmap", _plot_metric_correlation_heatmap, metrics_source_df, version_dir)
+    _safe("metric_pairplot", _plot_metric_pairplot, metrics_source_df, version_dir)
+    _safe("parallel_coordinates", _plot_parallel_coordinates, metrics_source_df, version_dir)
+    _safe("profile_radar", _plot_profile_radar, profile_summary_df, version_dir)
+    _safe("parameter_impact_heatmap", _plot_parameter_impact_heatmap, metrics_source_df, version_dir)
+    _safe("parameter_sweep", _plot_parameter_sweep, metrics_source_df, version_dir)
 
     with open(os.path.join(output_root, "LATEST_VERSION.txt"), "w", encoding="utf-8") as handle:
         handle.write(str(version))
 
-    print(f"Graphiques générés dans {version_dir}/ (données manquantes ignorées silencieusement graphique par graphique).")
+    print(
+        f"Graphiques générés dans {version_dir}/ à partir de {DATA_DIR} et {WEIGHTS_DIR} "
+        "(données manquantes ignorées silencieusement graphique par graphique)."
+    )
     return version
 
 

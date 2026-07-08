@@ -12,8 +12,10 @@ import json
 import os
 from typing import Any, Dict, Optional
 
-WEIGHTS_DIR = "weights"
-DATA_DIR = "data"
+import project_paths
+
+WEIGHTS_DIR = project_paths.WEIGHTS_DIR
+DATA_DIR = project_paths.DATA_DIR
 
 
 def ensure_dir(path: str) -> None:

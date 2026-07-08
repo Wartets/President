@@ -81,9 +81,14 @@ règles_activées_par_config`.
 
 ## 12. Courbes d'apprentissage (`training_learning_curves.png`)
 
-Attendu : tendance croissante (ou non décroissante) du VP moyen glissant au fil des manches d'entraînement pour `RLAgent`/`TorchRLAgent`
-contre des adversaires fixes, la politique nulle initiale ne pouvant statistiquement pas être optimale. Test : VP moyen des 10 % dernières
-manches strictement supérieur au VP moyen des 10 % premières manches, à epsilon d'exploration décroissant.
+Attendu : tendance croissante (ou non décroissante) du VP moyen glissant au fil des manches d'entraînement pour `RLAgent`/`TorchRLAgent`,
+la politique nulle initiale ne pouvant statistiquement pas être optimale. Depuis l'introduction du curriculum de règles variées
+(`research.run_pipeline`, section 12.1 de `architecture.md`), les adversaires et le jeu de règles changent de bloc en bloc au sein d'un
+même incrément d'entraînement plutôt que de rester fixes sur toute sa durée : la courbe glissante peut donc présenter des paliers ou de
+légères régressions transitoires à chaque changement de bloc (l'agent doit réadapter partiellement sa politique à une nouvelle
+combinaison de règles), sans que cela ne remette en cause la tendance croissante attendue sur la totalité de l'historique cumulé. Test :
+VP moyen des 10 % dernières manches strictement supérieur au VP moyen des 10 % premières manches, calculé sur l'historique cumulé complet
+plutôt que sur un unique bloc de curriculum.
 
 ## 13. Efficacité du Putsch (`putsch_efficiency_ci.png`)
 
