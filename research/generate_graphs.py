@@ -34,6 +34,10 @@ import seaborn as sns
 
 sns.set_theme(style="whitegrid")
 
+import sys
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(project_root)
+
 import project_paths
 
 DATA_DIR = project_paths.DATA_DIR
